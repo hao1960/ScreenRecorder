@@ -27,5 +27,6 @@ private:
     QProcess m_ffmpeg;
     QString m_outputFile;
     RegionSelector m_selector;
+    QRect m_recordingRegion;
 };
 #endif // MAINWINDOW_H
