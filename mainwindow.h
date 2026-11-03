@@ -28,5 +28,9 @@ private:
     QString m_outputFile;
     RegionSelector m_selector;
     QRect m_recordingRegion;
+
+    QString m_outputDirectory;
+    QString nextOutputFilePath() const;
+
 };
 #endif // MAINWINDOW_H

@@ -33,6 +33,23 @@
      </widget>
     </item>
     <item>
+     <widget class="QLabel" name="outputDirectoryLabel">
+      <property name="text">
+       <string>保存目录</string>
+      </property>
+      <property name="wordWrap">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QPushButton" name="chooseOutputDirectoryButton">
+      <property name="text">
+       <string>选择保存目录</string>
+      </property>
+     </widget>
+    </item>
+    <item>
      <widget class="QPushButton" name="startButton">
       <property name="text">
        <string>开始录制</string>
