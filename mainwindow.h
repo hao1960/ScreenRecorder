@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QTimer>
 #include "QProcess"
 #include "QString"
 #include "regionselector.h"
@@ -31,6 +32,9 @@ private:
 
     QString m_outputDirectory;
     QString nextOutputFilePath() const;
+
+    QTimer m_stopTimer; // 等待 FFmpeg 正常退出的计时器
+    bool m_stopTimedOut = false; // finished 回调据此识别强制结束
 
 };
 #endif // MAINWINDOW_H
