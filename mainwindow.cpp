@@ -1,6 +1,8 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDebug>
 #include <QFileInfo>
 #include <QstandardPaths>
 #include <QCloseEvent>
@@ -11,6 +13,8 @@
 #include <QFileDialog>
 #include <QSettings>
 #include <QTemporaryFile>
+#include <QComboBox>
+#include <QRegularExpression>
 #include "regionselector.h"
 
 namespace{
@@ -50,8 +54,41 @@ QString checkFFmpegFeature(const QString &program,const QString &topic,const QBy
     }
     return {};
 }
+
+// FFmpeg 的设备列表写在标准错误中，列举结束时可能返回非零退出码。
+QStringList microphoneDevices(const QString &ffmpeg, QString *error)
+{
+    if (ffmpeg.isEmpty()) {
+        *error = QStringLiteral("找不到 FFmpeg，无法加载麦克风");
+        return {};
+    }
+    QProcess probe;
+    probe.setProcessChannelMode(QProcess::MergedChannels);
+    probe.start(ffmpeg, {"-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"});
+    // shortcut: 设备查询最多阻塞界面 3 秒；若出现卡顿再改为异步查询。
+    if (!probe.waitForFinished(3000)) {
+        if (probe.state() != QProcess::NotRunning) {
+            probe.kill();
+            probe.waitForFinished(1000);
+        }
+        *error = QStringLiteral("麦克风设备查询失败或超时");
+        return {};
+    }
+    const QString output = QString::fromUtf8(probe.readAllStandardOutput());
+    const QRegularExpression pattern(QStringLiteral("\\\"([^\\\"]+)\\\"\\s+\\(audio\\)"));
+    QStringList devices;
+    auto matches = pattern.globalMatch(output);
+    while (matches.hasNext())
+        devices.append(matches.next().captured(1));
+    if (devices.isEmpty()) {
+        *error = output.contains("Could not enumerate audio only devices")
+            ? QStringLiteral("未检测到麦克风，请检查设备或权限")
+            : QStringLiteral("无法获取麦克风列表，请检查 FFmpeg 的 DirectShow 支持");
+    }
+    return devices;
+}
 // 用 ffprobe 核对 MP4 的视频编码、尺寸和时长；返回空字符串表示通过。
-QString checkVideoFile(const QString &path)
+QString checkVideoFile(const QString &path, const QString &expectedCodec)
 {
     const QString ffprobe = QStandardPaths::findExecutable("ffprobe");
     if(ffprobe.isEmpty())
@@ -96,7 +133,7 @@ QString checkVideoFile(const QString &path)
 
     // 错误原因分类
     const QString codecName = field("codec_name");
-    if(codecName != "h264")
+    if(codecName != expectedCodec)
         return QStringLiteral("视频编码未通过，探测到：%1").arg(codecName.isEmpty()?QStringLiteral("未识别"):codecName);
 
     if(!widthOk || !heightOk || width <= 0 || height <= 0)
@@ -105,6 +142,29 @@ QString checkVideoFile(const QString &path)
     if(!durationOk || duration <= 0)
         return QStringLiteral("视频时长无效");
     return {}; // 空字符串表示检查通过
+}
+
+// 用户选择麦克风时，还需确认输出文件包含音频流。
+QString checkAudioFile(const QString &path)
+{
+    const QString ffprobe = QStandardPaths::findExecutable("ffprobe");
+    if (ffprobe.isEmpty())
+        return QStringLiteral("找不到 ffprobe，无法验证音频");
+    QProcess probe;
+    probe.start(ffprobe, {"-v", "error", "-select_streams", "a:0", "-show_entries",
+                          "stream=codec_type", "-of", "default=noprint_wrappers=1", path});
+    // shortcut: 音频流检查最多阻塞界面 3 秒；若出现卡顿再改为异步查询。
+    if (!probe.waitForFinished(3000)) {
+        if (probe.state() != QProcess::NotRunning) {
+            probe.kill();
+            probe.waitForFinished(1000);
+        }
+        return QStringLiteral("音频验证失败或超时");
+    }
+    if (probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0 ||
+        !probe.readAllStandardOutput().contains("codec_type=audio"))
+        return QStringLiteral("未检测到有效音频流，请检查音频设备");
+    return {};
 }
 }
 
@@ -116,8 +176,137 @@ MainWindow::MainWindow(QWidget *parent)
     ui->usingRegionCheckBox->setEnabled(true);
     ui->stopButton->setEnabled(false);
     ui->chooseOutputDirectoryButton->setEnabled(true);
+    ui->cancelCountdownButton->setEnabled(false);
+    for (int i = 0; i < ui->countdownSecondsComboBox->count(); ++i)
+        ui->countdownSecondsComboBox->setItemData(i, i + 1);
+    ui->countdownSecondsComboBox->setEnabled(ui->countdownCheckBox->isChecked());
+    connect(ui->countdownCheckBox, &QCheckBox::toggled, ui->countdownSecondsComboBox, &QComboBox::setEnabled);
+
+    // 倒计时结束后才启动已准备好的录制进程。
+    m_countdownTimer.setInterval(1000);
+    m_countdownTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_countdownTimer, &QTimer::timeout, this, [this] {
+        if (--m_countdownRemaining > 0) {
+            ui->statusLabel->setText(QStringLiteral("状态：%1 秒后开始录制").arg(m_countdownRemaining));
+            return;
+        }
+        m_countdownTimer.stop();
+        ui->cancelCountdownButton->setEnabled(false);
+        ui->statusLabel->setText(QStringLiteral("状态：准备中"));
+        m_ffmpeg.start(m_pendingProgram, m_pendingArgs);
+        m_pendingProgram.clear();
+        m_pendingArgs.clear();
+    });
+    connect(ui->cancelCountdownButton, &QPushButton::clicked, this, [this] {
+        if (!m_countdownTimer.isActive())
+            return;
+        m_countdownTimer.stop();
+        m_pendingProgram.clear();
+        m_pendingArgs.clear();
+        m_outputFile.clear();
+        m_waitingAudioStop = false;
+        cleanupAudioThread(); // 倒计时取消时管道尚未连接，线程会被取消并等待退出。
+        ui->statusLabel->setText(QStringLiteral("状态：倒计时已取消"));
+        ui->cancelCountdownButton->setEnabled(false);
+        ui->startButton->setEnabled(true);
+        ui->regionButton->setEnabled(true);
+        ui->usingRegionCheckBox->setEnabled(true);
+        ui->chooseOutputDirectoryButton->setEnabled(true);
+        ui->frameRateComboBox->setEnabled(true);
+        ui->encoderComboBox->setEnabled(true);
+        ui->qualityComboBox->setEnabled(true);
+        ui->microphoneCheckBox->setEnabled(true);
+        ui->microphoneComboBox->setEnabled(ui->microphoneCheckBox->isChecked() && ui->microphoneComboBox->count() > 1);
+        ui->systemAudioCheckBox->setEnabled(true);
+        ui->countdownCheckBox->setEnabled(true);
+        ui->countdownSecondsComboBox->setEnabled(ui->countdownCheckBox->isChecked());
+    });
     // 保存文件配置；读取顺序：上次目录-系统视频目录-用户主目录。旧目录被删时自动回退。无效模式值按全屏处理
     QSettings settings;
+    // 显示文字与实际帧率分开保存，配置无效时回退到 10 fps。
+    ui->frameRateComboBox->setItemData(0, 10);
+    ui->frameRateComboBox->setItemData(1, 15);
+    ui->frameRateComboBox->setItemData(2, 30);
+    const int savedFrameRate = settings.value("frameRate", 10).toInt();
+    const int frameRateIndex = ui->frameRateComboBox->findData(savedFrameRate);
+    ui->frameRateComboBox->setCurrentIndex(frameRateIndex >= 0 ? frameRateIndex : 0);
+    connect(ui->frameRateComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
+        QSettings settings;
+        settings.setValue("frameRate", ui->frameRateComboBox->currentData());
+    });
+    // 只展示当前 FFmpeg 支持的编码器，保存的编码器失效时要求用户重新选择。
+    ui->encoderComboBox->clear();
+    ui->encoderComboBox->addItem(QStringLiteral("请选择可用编码器"));
+    const QString ffmpegPath = QStandardPaths::findExecutable("ffmpeg");
+    if (!ffmpegPath.isEmpty()) {
+        if (checkFFmpegFeature(ffmpegPath, "encoder=libx264", "Encoder libx264 [", QStringLiteral("H.264")).isEmpty())
+            ui->encoderComboBox->addItem(QStringLiteral("H.264（libx264）"), QStringLiteral("libx264"));
+        if (checkFFmpegFeature(ffmpegPath, "encoder=libx265", "Encoder libx265 [", QStringLiteral("H.265")).isEmpty())
+            ui->encoderComboBox->addItem(QStringLiteral("H.265（libx265）"), QStringLiteral("libx265"));
+    }
+    const int encoderIndex = ui->encoderComboBox->findData(settings.value("videoEncoder", "libx264"));
+    ui->encoderComboBox->setCurrentIndex(encoderIndex >= 0 ? encoderIndex : 0);
+    if (encoderIndex < 0)
+        ui->statusbar->showMessage(QStringLiteral("已保存的编码器不可用，请选择可用编码器"));
+    connect(ui->encoderComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (ui->encoderComboBox->currentData().isValid()) {
+            QSettings settings;
+            settings.setValue("videoEncoder", ui->encoderComboBox->currentData());
+        }
+    });
+
+    ui->qualityComboBox->clear();
+    ui->qualityComboBox->addItem(QStringLiteral("画质：较高"), QStringLiteral("high"));
+    ui->qualityComboBox->addItem(QStringLiteral("画质：均衡"), QStringLiteral("balanced"));
+    ui->qualityComboBox->addItem(QStringLiteral("画质：较小文件"), QStringLiteral("small"));
+    const int qualityIndex = ui->qualityComboBox->findData(settings.value("videoQuality", "balanced"));
+    ui->qualityComboBox->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 1);
+    connect(ui->qualityComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
+        QSettings settings;
+        settings.setValue("videoQuality", ui->qualityComboBox->currentData());
+    });
+    ui->microphoneComboBox->clear();
+    ui->microphoneComboBox->addItem(QStringLiteral("请先启用麦克风"));
+    ui->microphoneComboBox->setEnabled(false);
+    connect(ui->microphoneCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
+        QSettings settings;
+        settings.setValue("microphoneEnabled", enabled);
+        ui->microphoneComboBox->clear();
+        if (!enabled) {
+            ui->microphoneComboBox->addItem(QStringLiteral("请先启用麦克风"));
+            ui->microphoneComboBox->setEnabled(false);
+            return;
+        }
+        QString error;
+        const QStringList devices = microphoneDevices(QStandardPaths::findExecutable("ffmpeg"), &error);
+        if (devices.isEmpty()) {
+            ui->microphoneComboBox->addItem(QStringLiteral("无可用麦克风"));
+            ui->microphoneComboBox->setEnabled(false);
+            ui->statusbar->showMessage(error);
+            return;
+        }
+        const QString savedDevice = settings.value("microphoneDevice").toString();
+        // 旧设备消失时要求重新选择，避免悄悄切换录音来源。
+        ui->microphoneComboBox->addItem(QStringLiteral("请选择麦克风"));
+        for (const QString &device : devices)
+            ui->microphoneComboBox->addItem(device, device);
+        const int index = ui->microphoneComboBox->findData(savedDevice);
+        ui->microphoneComboBox->setCurrentIndex(index >= 0 ? index : 0);
+        ui->microphoneComboBox->setEnabled(true);
+    });
+    connect(ui->microphoneComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
+        if (ui->microphoneComboBox->currentData().isValid()) {
+            QSettings settings;
+            settings.setValue("microphoneDevice", ui->microphoneComboBox->currentData());
+        }
+    });
+    ui->microphoneCheckBox->setChecked(settings.value("microphoneEnabled", false).toBool());
+    // 原生系统声音采集（WASAPI 回环 + 命名管道）已接入，勾选状态随设置持久化。
+    connect(ui->systemAudioCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
+        QSettings settings;
+        settings.setValue("systemAudioEnabled", enabled);
+    });
+    ui->systemAudioCheckBox->setChecked(settings.value("systemAudioEnabled", false).toBool());
     const QString savedDir = settings.value("outputDirectory").toString();
     // 上次目录不可用时，尝试系统默认的“视频”目录。
     const QString moviesDir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
@@ -147,20 +336,36 @@ MainWindow::MainWindow(QWidget *parent)
     // FFmpeg 启动失败时恢复按钮，并显示错误原因。
     connect(&m_ffmpeg,&QProcess::errorOccurred, this,[this](QProcess::ProcessError error){
         if(error==QProcess::FailedToStart){
+            m_waitingAudioStop = false;
+            cleanupAudioThread();
             ui->startButton->setEnabled(true);
             ui->statusLabel->setText(QStringLiteral("状态：启动失败"));
             ui->statusbar->showMessage(m_ffmpeg.errorString());
             ui->regionButton->setEnabled(true);
             ui->usingRegionCheckBox->setEnabled(true);
             ui->chooseOutputDirectoryButton->setEnabled(true);
+            ui->frameRateComboBox->setEnabled(true);
+            ui->encoderComboBox->setEnabled(true);
+            ui->qualityComboBox->setEnabled(true);
+            ui->microphoneCheckBox->setEnabled(true);
+            ui->microphoneComboBox->setEnabled(ui->microphoneCheckBox->isChecked() && ui->microphoneComboBox->count() > 1);
+            ui->systemAudioCheckBox->setEnabled(true);
+            ui->countdownCheckBox->setEnabled(true);
+            ui->countdownSecondsComboBox->setEnabled(ui->countdownCheckBox->isChecked());
         }
     });
     // 进程结束后恢复界面，并区分停止超时、FFmpeg 失败与视频验证结果。
     connect(&m_ffmpeg,&QProcess::finished, this,[this](int exitcode,QProcess::ExitStatus exitStatus){
+        if (m_stopElapsed.isValid()) {
+            qInfo() << "[stop] click_to_finished_ms =" << m_stopElapsed.elapsed();
+            m_stopElapsed.invalidate();
+        }
         // 停止计时器，并记住本次是否因超时被强制结束。
         m_stopTimer.stop();
         const bool timedOut = m_stopTimedOut;
         m_stopTimedOut = false;
+        m_waitingAudioStop = false;
+        cleanupAudioThread(); // FFmpeg 已退出，采集线程必然已收尾或被取消。
 
         ui->startButton->setEnabled(true);
         ui->stopButton->setEnabled(false);
@@ -169,6 +374,14 @@ MainWindow::MainWindow(QWidget *parent)
         // 录制结束后允许切换全屏/区域模式，即使当前尚未选区。
         ui->usingRegionCheckBox->setEnabled(true);
         ui->chooseOutputDirectoryButton->setEnabled(true);
+        ui->frameRateComboBox->setEnabled(true);
+        ui->encoderComboBox->setEnabled(true);
+        ui->qualityComboBox->setEnabled(true);
+        ui->microphoneCheckBox->setEnabled(true);
+        ui->microphoneComboBox->setEnabled(ui->microphoneCheckBox->isChecked() && ui->microphoneComboBox->count() > 1);
+        ui->systemAudioCheckBox->setEnabled(true);
+        ui->countdownCheckBox->setEnabled(true);
+        ui->countdownSecondsComboBox->setEnabled(ui->countdownCheckBox->isChecked());
         if(timedOut){
             ui->statusLabel->setText(QStringLiteral("状态：停止超时"));
             ui->statusbar->showMessage(QStringLiteral("FFmpeg 已被强制结束，文件可能无法播放：%1").arg(m_outputFile));
@@ -178,7 +391,11 @@ MainWindow::MainWindow(QWidget *parent)
         // 仅在 FFmpeg 正常退出且文件非空时，才用 ffprobe 验证视频流。
         const bool ffmpegSucceeded = exitStatus == QProcess::NormalExit && exitcode ==0 && QFileInfo(m_outputFile).size() > 0;
 
-        const QString videoError = ffmpegSucceeded ? checkVideoFile(m_outputFile): QString{};
+        QString videoError = ffmpegSucceeded ? checkVideoFile(m_outputFile, m_expectedVideoCodec): QString{};
+        // 勾选任一音频来源时，都要求输出包含音频流。
+        if (ffmpegSucceeded && videoError.isEmpty() &&
+            (ui->microphoneCheckBox->isChecked() || ui->systemAudioCheckBox->isChecked()))
+            videoError = checkAudioFile(m_outputFile);
 
         const bool success = ffmpegSucceeded && videoError.isEmpty();
 
@@ -187,7 +404,7 @@ MainWindow::MainWindow(QWidget *parent)
             ui->statusbar->showMessage(QStringLiteral("文件：")+ m_outputFile);
         }
         else if(ffmpegSucceeded){
-            ui->statusLabel->setText(QStringLiteral("状态：视频验证未通过"));
+            ui->statusLabel->setText(QStringLiteral("状态：文件验证未通过"));
             ui->statusbar->showMessage(videoError + QStringLiteral("；文件：")+m_outputFile);
         }
         else{
@@ -205,8 +422,11 @@ MainWindow::MainWindow(QWidget *parent)
                        || error.contains("Access is denied", Qt::CaseInsensitive)) {
                 message = QStringLiteral("无法写入视频文件，请检查保存目录权限");
             } else if (error.contains("Error opening input", Qt::CaseInsensitive)
-                       || error.contains("Could not find video device", Qt::CaseInsensitive)) {
-                message = QStringLiteral("无法打开屏幕录制源，请检查选区和屏幕状态");
+                       || error.contains("Could not find video device", Qt::CaseInsensitive)
+                       || error.contains("Could not find audio", Qt::CaseInsensitive)) {
+                message = ui->microphoneCheckBox->isChecked()
+                    ? QStringLiteral("无法打开录制源，请检查屏幕、音频设备及权限")
+                    : QStringLiteral("无法打开屏幕录制源，请检查选区和屏幕状态");
             } else if (error.contains("Invalid argument", Qt::CaseInsensitive)) {
                 message = QStringLiteral("FFmpeg 拒绝录制参数，请检查选区和保存路径");
             } else if (error.isEmpty() && exitStatus != QProcess::NormalExit) {
@@ -227,7 +447,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
     // 点击开始：定位 FFmpeg、构造参数，然后异步启动录制进程。
     connect(ui->startButton,&QPushButton::clicked,this,[this](){
-        if(m_ffmpeg.state() != QProcess::NotRunning)
+        if(m_ffmpeg.state() != QProcess::NotRunning || m_countdownTimer.isActive())
             return;
 
         const QString ffmpeg = QStandardPaths::findExecutable(
@@ -244,9 +464,14 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
 
+        const QString encoder = ui->encoderComboBox->currentData().toString();
+        if (encoder.isEmpty()) {
+            ui->statusLabel->setText(QStringLiteral("状态：请选择可用编码器"));
+            return;
+        }
         const QString encoderError = checkFFmpegFeature(
-            ffmpeg,"encoder=libx264","Encoder libx264 [",
-            QStringLiteral("H.264 编码器 libx264"));
+            ffmpeg, QStringLiteral("encoder=") + encoder,
+            QByteArray("Encoder ") + encoder.toUtf8() + " [", encoder);
 
         if(!encoderError.isEmpty()){
             ui->statusLabel->setText(QStringLiteral("状态：环境检查失败"));
@@ -255,7 +480,7 @@ MainWindow::MainWindow(QWidget *parent)
         }
         QStringList args{
             "-hide_banner", "-loglevel", "error", "-n",
-            "-f", "gdigrab", "-framerate", "10"
+            "-f", "gdigrab", "-framerate", ui->frameRateComboBox->currentData().toString()
         };
         // 仅在区域模式下，把 Qt 逻辑坐标换算成 FFmpeg 所需的屏幕像素参数。
         if(ui->usingRegionCheckBox->isChecked()){
@@ -289,30 +514,141 @@ MainWindow::MainWindow(QWidget *parent)
         }
         m_outputFile = nextOutputFilePath();
 
-        args << "-i" << "desktop"
-             << "-c:v"<< "libx264"
-             << "-preset"<<"ultrafast"
-             << "-pix_fmt"<<"yuv420p"
-             << m_outputFile;
+        args << "-i" << "desktop";
+        // 麦克风输入先只占位输入索引；映射和音频编码参数在最后统一拼接，
+        // 否则系统声音的管道输入插进来会打乱流索引。
+        bool microphoneAdded = false;
+        if (ui->microphoneCheckBox->isChecked()) {
+            const QString device = ui->microphoneComboBox->currentData().toString();
+            if (device.isEmpty()) {
+                ui->statusLabel->setText(QStringLiteral("状态：请选择可用麦克风"));
+                ui->statusbar->showMessage(QStringLiteral("重新勾选麦克风可刷新设备列表"));
+                return;
+            }
+            args << "-f" << "dshow" << "-i" << (QStringLiteral("audio=") + device);
+            microphoneAdded = true;
+        }
+        const QString quality = ui->qualityComboBox->currentData().toString();
+        // x264 与 x265 各自使用质量参数，数值不代表跨编码器的相同画质。
+        const int crf = encoder == "libx265"
+            ? (quality == "high" ? 23 : quality == "small" ? 33 : 28)
+            : (quality == "high" ? 18 : quality == "small" ? 28 : 23);
+        m_expectedVideoCodec = encoder == "libx265" ? "hevc" : "h264";
+
+        // 映射与编码参数（输出文件除外）：视频恒为输入 0，麦克风为 1，管道音频顺延。
+        const bool systemAudioWanted = ui->systemAudioCheckBox->isChecked();
+        QStringList mapAndEncode{ "-map", "0:v:0" };
+        int nextAudioInput = 1;
+        if (microphoneAdded) {
+            mapAndEncode << "-map" << "1:a:0";
+            nextAudioInput = 2;
+        }
+        if (systemAudioWanted)
+            mapAndEncode << "-map" << QStringLiteral("%1:a:0").arg(nextAudioInput);
+        if (microphoneAdded || systemAudioWanted)
+            mapAndEncode << "-c:a" << "aac";
+        mapAndEncode << "-c:v"<< encoder
+                     << "-preset"<<"ultrafast"
+                     << "-crf" << QString::number(crf)
+                     << "-pix_fmt"<<"yuv420p";
 
         ui->startButton->setEnabled(false);
         ui->statusLabel->setText(QStringLiteral("状态：准备中"));
+        ui->statusbar->clearMessage();
         // 录制前禁用区域选择，避免遮罩进入录制
         ui->regionButton->setEnabled(false);
         ui->usingRegionCheckBox->setEnabled(false);
         // 开始录制时，禁用选择保存目录地址
         ui->chooseOutputDirectoryButton->setEnabled(false);
-        m_ffmpeg.start(ffmpeg, args);
+        ui->frameRateComboBox->setEnabled(false);
+        ui->encoderComboBox->setEnabled(false);
+        ui->qualityComboBox->setEnabled(false);
+        ui->microphoneCheckBox->setEnabled(false);
+        ui->microphoneComboBox->setEnabled(false);
+        ui->systemAudioCheckBox->setEnabled(false);
+        ui->countdownCheckBox->setEnabled(false);
+        ui->countdownSecondsComboBox->setEnabled(false);
+
+        if (systemAudioWanted) {
+            // 系统声音：先让采集线程建好命名管道，FFmpeg 的真实音频格式
+            // （采样率/声道/布局）由 pipeReady 带回后再补齐参数并启动。
+            const QString pipeName = QStringLiteral("\\\\.\\pipe\\ScreenRecorder_%1_%2")
+                .arg(QCoreApplication::applicationPid())
+                .arg(QDateTime::currentMSecsSinceEpoch());
+            m_audioThread = new SystemAudioThread(pipeName);
+            connect(m_audioThread, &SystemAudioThread::pipeReady, this,
+                [this, ffmpeg, args, mapAndEncode](const QString &name, quint32 sampleRate,
+                                                   quint16 channels, quint32 channelMask) mutable {
+                // 输入参数必须与采集线程确认过的 float32 格式完全一致。
+                args << "-f" << "f32le" << "-ar" << QString::number(sampleRate)
+                     << "-ac" << QString::number(channels)
+                     << "-channel_layout" << "0x" + QString::number(channelMask, 16)
+                     << "-probesize" << "32" << "-analyzeduration" << "0"
+                     << "-i" << name
+                     << mapAndEncode << m_outputFile;
+                launchRecording(ffmpeg, args);
+            });
+            connect(m_audioThread, &SystemAudioThread::captureStopped, this, [this](quint64) {
+                // 采集线程收尾（管道已关闭，FFmpeg 音频流自然结束）后再发 q，
+                // 直接发 q 会打断管道写入并让线程报错。
+                if (m_waitingAudioStop) {
+                    m_waitingAudioStop = false;
+                    if (m_ffmpeg.state() == QProcess::Running)
+                        sendStopToFFmpeg();
+                }
+            });
+            connect(m_audioThread, &SystemAudioThread::captureFailed, this,
+                [this](const QString &message) {
+                const bool wasWaitingStop = m_waitingAudioStop;
+                m_waitingAudioStop = false;
+                const bool recording = m_ffmpeg.state() == QProcess::Running;
+                cleanupAudioThread();
+                ui->statusbar->showMessage(QStringLiteral("系统声音采集失败：%1").arg(message));
+                if (!recording) {
+                    // FFmpeg 尚未启动：整体中止本次录制，恢复界面。
+                    ui->statusLabel->setText(QStringLiteral("状态：启动失败"));
+                    ui->startButton->setEnabled(true);
+                    ui->regionButton->setEnabled(true);
+                    ui->usingRegionCheckBox->setEnabled(true);
+                    ui->chooseOutputDirectoryButton->setEnabled(true);
+                    ui->frameRateComboBox->setEnabled(true);
+                    ui->encoderComboBox->setEnabled(true);
+                    ui->qualityComboBox->setEnabled(true);
+                    ui->microphoneCheckBox->setEnabled(true);
+                    ui->microphoneComboBox->setEnabled(ui->microphoneCheckBox->isChecked() && ui->microphoneComboBox->count() > 1);
+                    ui->systemAudioCheckBox->setEnabled(true);
+                    ui->countdownCheckBox->setEnabled(true);
+                    ui->countdownSecondsComboBox->setEnabled(ui->countdownCheckBox->isChecked());
+                    return;
+                }
+                // 采集中途失败：视频继续录制并在状态栏提示；若正在等停止则直接发 q。
+                if (wasWaitingStop && m_ffmpeg.state() == QProcess::Running)
+                    sendStopToFFmpeg();
+            });
+            ui->statusLabel->setText(QStringLiteral("状态：准备中（启动系统声音）"));
+            m_audioThread->startCapture();
+            return;
+        }
+
+        args << mapAndEncode << m_outputFile;
+        launchRecording(ffmpeg, args);
     });
-    // 点击停止：发送 q 给 FFmpeg，等待 finished 信号确认文件已保存。
+    // 点击停止：勾选系统声音时先等采集线程收尾，再发 q 给 FFmpeg 完成封装。
     connect(ui->stopButton,&QPushButton::clicked,this,[this](){
         if(m_ffmpeg.state()!= QProcess::Running)
             return;
 
+        m_stopElapsed.start();
         ui->stopButton->setEnabled(false);
         ui->statusLabel->setText(QStringLiteral("状态：正在保存"));
-        // 请求 FFmpeg 完成 MP4 封装并正常退出。
-        m_ffmpeg.write("q\n");
+        if (m_audioThread && m_audioThread->isRunning()) {
+            // 先写完停止时刻之前的音频，再由 captureStopped 回调给 FFmpeg 发 q。
+            m_waitingAudioStop = true;
+            m_audioThread->requestStop();
+        } else {
+            // 请求 FFmpeg 完成 MP4 封装并正常退出。
+            sendStopToFFmpeg();
+        }
         // 15 秒后仍未退出，则由计时器强制结束进程。
         m_stopTimer.start(15000);
     });
@@ -381,6 +717,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    cleanupAudioThread();
     delete ui;
 }
 
@@ -390,7 +727,50 @@ void MainWindow::closeEvent(QCloseEvent*event){
         ui->statusLabel->setText(QStringLiteral("状态：请先停止录制，等待保存完成后退出"));
         return;
     }
+    if(m_audioThread){
+        // 采集线程可能在等倒计时或管道连接，直接关闭会遗留工作线程。
+        event->ignore();
+        ui->statusLabel->setText(QStringLiteral("状态：请先取消或完成本次录制"));
+        return;
+    }
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::sendStopToFFmpeg()
+{
+    // write 的返回值表示进入写缓冲的字节数，FFmpeg 实际处理 q 可能更晚。
+    const qint64 queued = m_ffmpeg.write("q\n");
+    qInfo() << "[stop] click_to_q_ms =" << m_stopElapsed.elapsed()
+            << "queued_bytes =" << queued;
+}
+
+void MainWindow::cleanupAudioThread()
+{
+    if(!m_audioThread)
+        return;
+    if(m_audioThread->isRunning()){
+        // 线程内所有阻塞 I/O（等连接、写管道）都能被 requestInterruption 取消，
+        // 因此 wait 有设计上界；正常路径下线程早已自行退出。
+        m_audioThread->requestInterruption();
+        m_audioThread->wait();
+    }
+    delete m_audioThread;
+    m_audioThread = nullptr;
+}
+
+void MainWindow::launchRecording(const QString &program, const QStringList &args)
+{
+    // 倒计时结束后由计时器回调启动；否则立即启动 FFmpeg。
+    if (ui->countdownCheckBox->isChecked()) {
+        m_pendingProgram = program;
+        m_pendingArgs = args;
+        m_countdownRemaining = ui->countdownSecondsComboBox->currentData().toInt();
+        ui->statusLabel->setText(QStringLiteral("状态：%1 秒后开始录制").arg(m_countdownRemaining));
+        ui->cancelCountdownButton->setEnabled(true);
+        m_countdownTimer.start();
+    } else {
+        m_ffmpeg.start(program, args);
+    }
 }
 
 QString MainWindow::nextOutputFilePath() const {
