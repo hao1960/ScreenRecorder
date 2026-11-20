@@ -48,6 +48,27 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1 -Version 0.1.0
 - 录制一段 10～15 秒全屏视频，停止，确认能播放且有声音；再测区域/窗口。
 - 检查开始菜单快捷方式、卸载入口；卸载后安装目录和快捷方式应消失，用户录像不应被删除。
 
+### 本地测试 Error 5：`%TEMP%\is-....tmp` 拒绝访问
+
+如果 setup 报：
+
+```text
+Setup was unable to create the directory
+"C:\Users\<用户>\AppData\Local\Temp\is-....tmp".
+Error 5: 拒绝访问。
+```
+
+这通常是 **setup.exe 继承了低完整性级别（Low integrity）**，常见于从受沙箱/低权限目录（例如 DSH 工作区）直接运行。低完整性进程不能写入普通 `%TEMP%`。
+
+处理方式：
+
+1. 把 setup.exe **复制到桌面或下载目录**，再从那里运行（复制后通常会继承目标目录的 Medium 完整性）；
+2. 或者在有权限的环境执行：
+   ```powershell
+   icacls "ScreenRecorder-0.1.0-setup.exe" /setintegritylevel Medium
+   ```
+3. 不需要修改安装脚本；这是本地测试环境问题，上传到 GitHub 后再下载的文件不会携带工作区的 NTFS 完整性标签。
+
 ## 3. 干净环境验收记录
 
 建议记录：
