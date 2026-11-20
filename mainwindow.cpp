@@ -716,6 +716,9 @@ MainWindow::MainWindow(QWidget *parent)
             mapAndEncode << "-map" << QStringLiteral("%1:a:0").arg(audioInput)
                          << "-c:a" << "aac";
         }
+        // 统一输出为 48 kHz 立体声，避免系统声音 8 声道/44.1 kHz 麦克风造成成片格式不一致。
+        if (microphoneInput >= 0 || systemAudioInput >= 0)
+            mapAndEncode << "-ar" << "48000" << "-ac" << "2";
         // 窗口的客户区可能是奇数，编码前裁到偶数；全屏/区域已经显式取偶。
         if (m_recordMode == RecordMode::Window)
             mapAndEncode << "-vf" << "crop=trunc(iw/2)*2:trunc(ih/2)*2";
