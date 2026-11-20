@@ -695,16 +695,27 @@ MainWindow::MainWindow(QWidget *parent)
 
         // 映射与编码参数（输出文件除外）：视频恒为输入 0，麦克风为 1，管道音频顺延。
         const bool systemAudioWanted = ui->systemAudioCheckBox->isChecked();
+        const int microphoneInput = microphoneAdded ? 1 : -1;
+        const int systemAudioInput = systemAudioWanted
+            ? (microphoneAdded ? 2 : 1)
+            : -1;
+
         QStringList mapAndEncode{ "-map", "0:v:0" };
-        int nextAudioInput = 1;
-        if (microphoneAdded) {
-            mapAndEncode << "-map" << "1:a:0";
-            nextAudioInput = 2;
+        if (microphoneInput >= 0 && systemAudioInput >= 0) {
+            // 两路同时开启时混成一条音轨，避免播放器只读第一条音轨。
+            mapAndEncode << "-filter_complex"
+                         << QStringLiteral("[%1:a][%2:a]amix=inputs=2:duration=longest:"
+                                           "dropout_transition=0:normalize=1[a]")
+                                .arg(microphoneInput)
+                                .arg(systemAudioInput)
+                         << "-map" << "[a]"
+                         << "-c:a" << "aac";
+        } else if (microphoneInput >= 0 || systemAudioInput >= 0) {
+            // 只有一路音频时保持原来的单输入映射。
+            const int audioInput = microphoneInput >= 0 ? microphoneInput : systemAudioInput;
+            mapAndEncode << "-map" << QStringLiteral("%1:a:0").arg(audioInput)
+                         << "-c:a" << "aac";
         }
-        if (systemAudioWanted)
-            mapAndEncode << "-map" << QStringLiteral("%1:a:0").arg(nextAudioInput);
-        if (microphoneAdded || systemAudioWanted)
-            mapAndEncode << "-c:a" << "aac";
         // 窗口的客户区可能是奇数，编码前裁到偶数；全屏/区域已经显式取偶。
         if (m_recordMode == RecordMode::Window)
             mapAndEncode << "-vf" << "crop=trunc(iw/2)*2:trunc(ih/2)*2";

@@ -40,6 +40,10 @@ Windows 屏幕录制学习工具，使用 **Qt 6 Widgets + CMake + C++**，通�
 
 ![窗口录制完成](design/ui-implemented-window-recorded.png)
 
+**系统声音 + 麦克风混音**
+
+![系统声音和麦克风混音](design/ui-implemented-audio-mixed.png)
+
 > 设计稿的 HTML 源文件在 [design/ui-mockup-v3.html](design/ui-mockup-v3.html)。
 
 ## 当前功能
@@ -51,7 +55,7 @@ Windows 屏幕录制学习工具，使用 **Qt 6 Widgets + CMake + C++**，通�
   - 窗口支持选择目标窗口、客户区尺寸显示，遮挡时仍录制目标窗口内容。
 - 保存目录、录制模式、帧率、编码器和画质使用 `QSettings` 持久化。
 - 帧率 10 / 15 / 30 fps；H.264 / H.265；三档画质（CRF）。
-- 麦克风（DirectShow）与系统声音（WASAPI 回环 + 命名管道）。
+- 麦克风（DirectShow）与系统声音（WASAPI 回环 + 命名管道）；两路同时开启时用 FFmpeg `amix` 混成一条 AAC 音轨，避免播放器只读第一条音轨。
 - 录制前倒计时、取消倒计时、停止超时保护和 ffprobe 输出校验。
 - 区域/全屏使用显式 `offset + video_size`；窗口使用 `hwnd=` 并裁剪到偶数尺寸；停止后用 ffprobe 校验宽高。
 - 窗口录制中最小化或关闭目标窗口时自动停止，保留已录片段并在底部说明原因。
