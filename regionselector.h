@@ -5,7 +5,9 @@
 #include <QPushButton>
 #include <QRect>
 #include <QRubberBand>
-#include<QWidget>
+#include <QWidget>
+#include <QLabel>
+#include <QFrame>
 class QKeyEvent;
 
 class RegionSelector:public QWidget
@@ -29,9 +31,15 @@ protected:
     void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
+    // 在选区旁显示实时宽高，避免只能看主窗口状态栏
+    void updateSizeLabel(const QRect &selection);
+    void positionTopBar();
+
     QRubberBand m_band;
+    QFrame m_topBar;
     QPushButton m_confirmButton;
     QPushButton m_cancelButton;
+    QLabel m_sizeLabel;
     QPoint m_origin;
     QRect m_selection;
     bool m_dragging = false;
