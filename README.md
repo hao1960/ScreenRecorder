@@ -2,7 +2,7 @@
 
 **一个用 Qt 6 + C++ + FFmpeg 写的 Windows 屏幕录制工具：全屏 / 区域 / 窗口三种录制模式，支持系统声音与麦克风混音、倒计时和录制后自动校验。**
 
-[**下载最新安装包**](https://github.com/hao1960/ScreenRecorder/releases) ·
+[**下载最新安装包**](https://github.com/hao1960/ScreenRecorder/releases/latest) ·
 [从源码构建](#从源码构建) ·
 [已知限制](#已知限制) ·
 [开发记录](学习记录.md)
@@ -27,7 +27,7 @@
 
 ## 安装
 
-1. 打开 [Releases](https://github.com/hao1960/ScreenRecorder/releases)，下载最新的 `ScreenRecorder-*-setup.exe`。
+1. 打开 [Releases](https://github.com/hao1960/ScreenRecorder/releases/latest)，下载最新的 `ScreenRecorder-*-setup.exe`。
 2. 运行安装包，按向导完成安装；默认安装到当前用户目录，不需要管理员权限。
 3. 从开始菜单启动 `ScreenRecorder`。
 4. 卸载：Windows 设置 → 应用 → ScreenRecorder → 卸载，或开始菜单里的卸载快捷方式。

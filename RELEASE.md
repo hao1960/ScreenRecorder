@@ -1,5 +1,13 @@
 # Release checklist (v0.1.0)
 
+## 发布记录
+
+- 2026-11-20：已发布 [ScreenRecorder v0.1.0](https://github.com/hao1960/ScreenRecorder/releases/tag/v0.1.0)。
+- 安装包：`ScreenRecorder-0.1.0-setup.exe`（125,052,653 bytes，约 119 MB）。
+- SHA256：`8cf091b99d2b2377a3f51a51036a3d26aeb2cbe5d8b6278518f396ebabb6e4a9`。
+- Release 附件：setup、`SHA256SUMS.txt`、`ffmpeg-8.0.1.tar.xz`、`FFMPEG_BUILD_INFO.txt`、GPL/LGPL/第三方声明。
+- 待办：干净 VM 安装验收（本机已完成安装→录制→卸载）。
+
 ## 0. 准备
 
 - 安装 **Inno Setup 6**（需要 `ISCC.exe`，通常为 `C:\Program Files (x86)\Inno Setup 6\ISCC.exe`）。
