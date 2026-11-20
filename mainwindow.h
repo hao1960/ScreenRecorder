@@ -8,6 +8,7 @@
 #include "QString"
 #include "regionselector.h"
 #include "systemaudiothread.h"
+#include "windowenumerator.h"
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
@@ -32,6 +33,8 @@ protected:
     void closeEvent(QCloseEvent*event) override;
 
 private:
+    enum class RecordMode { Full, Region, Window };
+
     void buildUi();
     WindowTitleBar *createTitleBar();
     QWidget *createBasicPage();
@@ -44,6 +47,11 @@ private:
     void setModeButtonsEnabled(bool enabled);
     void updateModeUi();
     void updateOutputPathLabel();
+    void setRecordMode(RecordMode mode);
+    void selectWindow();
+    void updateWindowUi();
+    bool validateSelectedWindow(QString *error) const;
+    void requestStop(const QString &reason);
 
     WindowTitleBar *m_titleBar = nullptr;
     QTabBar *m_tabs = nullptr;
@@ -55,6 +63,15 @@ private:
     QWidget *m_regionSelectionRow = nullptr;
     QLabel *m_regionChip = nullptr;
     QLabel *m_regionMeta = nullptr;
+
+    RecordMode m_recordMode = RecordMode::Full;
+    WindowTarget m_selectedWindow;
+    QWidget *m_windowSelectionRow = nullptr;
+    QLabel *m_windowChip = nullptr;
+    QLabel *m_windowMeta = nullptr;
+    QPushButton *m_selectWindowButton = nullptr;
+    QTimer m_windowMonitor;
+    QString m_stopReason;
 
     Ui::MainWindow *ui;
     QProcess m_ffmpeg;

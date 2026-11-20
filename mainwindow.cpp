@@ -1,6 +1,15 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "windowtitlebar.h"
+#include "windowpickerdialog.h"
 
 #include <QFont>
 #include <QGridLayout>
@@ -417,21 +426,25 @@ MainWindow::MainWindow(QWidget *parent)
     updateOutputPathLabel();
 
     const QString mode = settings.value("recordingMode","full").toString();
-    ui->usingRegionCheckBox->setChecked(mode == "region");
-    if (mode == "region") {
-        setStateText(QStringLiteral("状态：待机"));
-        showStatusMessage(QStringLiteral("请先选择区域"));
-    }
+    if (mode == "region")
+        setRecordMode(RecordMode::Region);
+    else if (mode == "window")
+        setRecordMode(RecordMode::Window);
+    else
+        setRecordMode(RecordMode::Full);
 
 
     // FFmpeg 真正启动后，更新状态并允许停止。
     connect(&m_ffmpeg,&QProcess::started,this,[this](){
         setStateText(QStringLiteral("状态：录制中"));
         ui->stopButton->setEnabled(true);
+        if (m_recordMode == RecordMode::Window)
+            m_windowMonitor.start();
     });
     // FFmpeg 启动失败时恢复按钮，并显示错误原因。
     connect(&m_ffmpeg,&QProcess::errorOccurred, this,[this](QProcess::ProcessError error){
         if(error==QProcess::FailedToStart){
+            m_windowMonitor.stop();
             m_waitingAudioStop = false;
             cleanupAudioThread();
             ui->startButton->setEnabled(true);
@@ -458,6 +471,7 @@ MainWindow::MainWindow(QWidget *parent)
         }
         // 停止计时器，并记住本次是否因超时被强制结束。
         m_stopTimer.stop();
+        m_windowMonitor.stop();
         const bool timedOut = m_stopTimedOut;
         m_stopTimedOut = false;
         m_waitingAudioStop = false;
@@ -502,7 +516,11 @@ MainWindow::MainWindow(QWidget *parent)
 
         if(success){
             setStateText(QStringLiteral("状态：录制完成"));
-            showStatusMessage(QStringLiteral("文件：")+ m_outputFile);
+            const QString prefix = m_stopReason.isEmpty()
+                ? QString()
+                : m_stopReason + QStringLiteral("；");
+            showStatusMessage(prefix + QStringLiteral("文件：") + m_outputFile);
+            m_stopReason.clear();
         }
         else if(ffmpegSucceeded){
             setStateText(QStringLiteral("状态：文件验证未通过"));
@@ -551,6 +569,9 @@ MainWindow::MainWindow(QWidget *parent)
         if(m_ffmpeg.state() != QProcess::NotRunning || m_countdownTimer.isActive())
             return;
 
+        m_stopReason.clear();
+        m_windowMonitor.stop();
+
         const QString ffmpeg = QStandardPaths::findExecutable(
             QStringLiteral("ffmpeg"));
         if(ffmpeg.isEmpty()){
@@ -583,32 +604,59 @@ MainWindow::MainWindow(QWidget *parent)
             "-hide_banner", "-loglevel", "error", "-n",
             "-f", "gdigrab", "-framerate", ui->frameRateComboBox->currentData().toString()
         };
-        // 仅在区域模式下，把 Qt 逻辑坐标换算成 FFmpeg 所需的屏幕像素参数。
-        QScreen *screen = QGuiApplication::primaryScreen();
-        if (!screen) {
-            setStateText(QStringLiteral("状态：找不到主显示器"));
-            return;
+        // 窗口模式用 hwnd 输入；全屏/区域仍走主屏矩形 + offset/video_size。
+        if (m_recordMode == RecordMode::Window) {
+            QString windowError;
+            if (!validateSelectedWindow(&windowError)) {
+                setStateText(QStringLiteral("状态：窗口不可用"));
+                showStatusMessage(windowError);
+                return;
+            }
+
+            const HWND hwnd = reinterpret_cast<HWND>(m_selectedWindow.hwnd);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            m_selectedWindow.clientSize =
+                QSize(client.right - client.left, client.bottom - client.top);
+            m_expectedVideoWidth =
+                rec::evenDimension(m_selectedWindow.clientSize.width());
+            m_expectedVideoHeight =
+                rec::evenDimension(m_selectedWindow.clientSize.height());
+            if (m_expectedVideoWidth <= 0 || m_expectedVideoHeight <= 0) {
+                setStateText(QStringLiteral("状态：窗口尺寸无效"));
+                return;
+            }
+
+            args << "-i" << QStringLiteral("hwnd=0x%1")
+                .arg(static_cast<qulonglong>(m_selectedWindow.hwnd), 0, 16);
+        } else {
+            QScreen *screen = QGuiApplication::primaryScreen();
+            if (!screen) {
+                setStateText(QStringLiteral("状态：找不到主显示器"));
+                return;
+            }
+            const QRect screenRect = screen->geometry();
+            const bool useRegion = m_recordMode == RecordMode::Region;
+            if (useRegion && !m_recordingRegion.isValid()) {
+                setStateText(QStringLiteral("状态：请先选择区域"));
+                return;
+            }
+            // 全屏也显式指定主屏矩形：desktop 默认可能覆盖整个虚拟桌面，
+            // 多显示器时会录进副屏；显式 offset/video_size 才能保证首版只录主屏。
+            const QRect logicalCapture = useRegion ? m_recordingRegion : screenRect;
+            const CaptureRect capture = nativeCaptureRect(logicalCapture, screenRect,
+                                                          screen->devicePixelRatio());
+            if (capture.width <= 0 || capture.height <= 0) {
+                setStateText(QStringLiteral("状态：选区太小，无法录制"));
+                return;
+            }
+            args << "-offset_x" << QString::number(capture.x)
+                 << "-offset_y" << QString::number(capture.y)
+                 << "-video_size" << QStringLiteral("%1x%2").arg(capture.width).arg(capture.height);
+            m_expectedVideoWidth = capture.width;
+            m_expectedVideoHeight = capture.height;
+            args << "-i" << "desktop";
         }
-        const QRect screenRect = screen->geometry();
-        const bool useRegion = ui->usingRegionCheckBox->isChecked();
-        if (useRegion && !m_recordingRegion.isValid()) {
-            setStateText(QStringLiteral("状态：请先选择区域"));
-            return;
-        }
-        // 全屏也显式指定主屏矩形：desktop 默认可能覆盖整个虚拟桌面，
-        // 多显示器时会录进副屏；显式 offset/video_size 才能保证首版只录主屏。
-        const QRect logicalCapture = useRegion ? m_recordingRegion : screenRect;
-        const CaptureRect capture = nativeCaptureRect(logicalCapture, screenRect,
-                                                      screen->devicePixelRatio());
-        if (capture.width <= 0 || capture.height <= 0) {
-            setStateText(QStringLiteral("状态：选区太小，无法录制"));
-            return;
-        }
-        args << "-offset_x" << QString::number(capture.x)
-             << "-offset_y" << QString::number(capture.y)
-             << "-video_size" << QStringLiteral("%1x%2").arg(capture.width).arg(capture.height);
-        m_expectedVideoWidth = capture.width;
-        m_expectedVideoHeight = capture.height;
         // 启动前检查目录能否写入，并确定本次录像的完整文件路径。
         if(!canWriteDirectory(m_outputDirectory)){
             setStateText(QStringLiteral("状态：保存目录不可写，请重新选择"));
@@ -616,7 +664,6 @@ MainWindow::MainWindow(QWidget *parent)
         }
         m_outputFile = nextOutputFilePath();
 
-        args << "-i" << "desktop";
         // 麦克风输入先只占位输入索引；映射和音频编码参数在最后统一拼接，
         // 否则系统声音的管道输入插进来会打乱流索引。
         bool microphoneAdded = false;
@@ -658,6 +705,9 @@ MainWindow::MainWindow(QWidget *parent)
             mapAndEncode << "-map" << QStringLiteral("%1:a:0").arg(nextAudioInput);
         if (microphoneAdded || systemAudioWanted)
             mapAndEncode << "-c:a" << "aac";
+        // 窗口的客户区可能是奇数，编码前裁到偶数；全屏/区域已经显式取偶。
+        if (m_recordMode == RecordMode::Window)
+            mapAndEncode << "-vf" << "crop=trunc(iw/2)*2:trunc(ih/2)*2";
         mapAndEncode << "-c:v"<< encoder
                      << "-preset"<<"ultrafast"
                      << "-crf" << QString::number(crf)
@@ -744,24 +794,9 @@ MainWindow::MainWindow(QWidget *parent)
         args << mapAndEncode << m_outputFile;
         launchRecording(ffmpeg, args);
     });
-    // 点击停止：勾选系统声音时先等采集线程收尾，再发 q 给 FFmpeg 完成封装。
+    // 点击停止：交给统一的 requestStop，窗口监控也复用它。
     connect(ui->stopButton,&QPushButton::clicked,this,[this](){
-        if(m_ffmpeg.state()!= QProcess::Running)
-            return;
-
-        m_stopElapsed.start();
-        ui->stopButton->setEnabled(false);
-        setStateText(QStringLiteral("状态：正在保存"));
-        if (m_audioThread && m_audioThread->isRunning()) {
-            // 先写完停止时刻之前的音频，再由 captureStopped 回调给 FFmpeg 发 q。
-            m_waitingAudioStop = true;
-            m_audioThread->requestStop();
-        } else {
-            // 请求 FFmpeg 完成 MP4 封装并正常退出。
-            sendStopToFFmpeg();
-        }
-        // 15 秒后仍未退出，则由计时器强制结束进程。
-        m_stopTimer.start(15000);
+        requestStop(QString());
     });
 
 
@@ -774,12 +809,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_selector,&RegionSelector::regionConfirmed,this,[this](const QRect &region){
         m_recordingRegion = region;
         // 用户确认新选区后，切换到区域模式；选区本身保存在 m_recordingRegion。
-        ui->usingRegionCheckBox->setChecked(true);
         m_regionChip->setText(QStringLiteral("%1 × %2").arg(region.width()).arg(region.height()));
         m_regionMeta->setText(QStringLiteral("x=%1, y=%2").arg(region.x()).arg(region.y()));
         ui->regionButton->setText(QStringLiteral("重新选择"));
-        setStateText(QStringLiteral("状态：待机"));
-        updateOutputPathLabel();
+        setRecordMode(RecordMode::Region);
     });
 
 
@@ -802,20 +835,24 @@ MainWindow::MainWindow(QWidget *parent)
         settings.setValue("outputDirectory",m_outputDirectory);
         // 重新更新状态文字
         setStateText(QStringLiteral("状态：待机"));
-        if (ui->usingRegionCheckBox->isChecked() && !m_recordingRegion.isValid())
+        if (m_recordMode == RecordMode::Region && !m_recordingRegion.isValid())
             showStatusMessage(QStringLiteral("请先选择区域"));
+        else if (m_recordMode == RecordMode::Window && m_selectedWindow.hwnd == 0)
+            showStatusMessage(QStringLiteral("请先选择窗口"));
         else
             updateOutputPathLabel();
     });
-    // toggled 发出新的勾选状态；useRegion=true 代表区域模式，false 代表全屏模式。
-    connect(ui->usingRegionCheckBox,&QCheckBox::toggled,this,[this](bool useRegion){
-        QSettings settings;
-        settings.setValue("recordingMode",useRegion?"region":"full");
-        setStateText(QStringLiteral("状态：待机"));
-        if (useRegion && !m_recordingRegion.isValid())
-            showStatusMessage(QStringLiteral("请先选择区域"));
-        else
-            updateOutputPathLabel();
+
+    // 录制中每 500ms 检查目标窗口；关闭/最小化都走统一停止流程。
+    m_windowMonitor.setInterval(500);
+    connect(&m_windowMonitor, &QTimer::timeout, this, [this] {
+        if (m_recordMode != RecordMode::Window || m_selectedWindow.hwnd == 0)
+            return;
+        const HWND hwnd = reinterpret_cast<HWND>(m_selectedWindow.hwnd);
+        if (!IsWindow(hwnd))
+            requestStop(QStringLiteral("目标窗口已关闭"));
+        else if (IsIconic(hwnd))
+            requestStop(QStringLiteral("目标窗口已最小化"));
     });
 
     // 避免 FFmpeg 无响应时界面一直停留在“正在保存”。
@@ -927,9 +964,9 @@ void MainWindow::buildUi()
         if (m_pages && index >= 0 && index < m_pages->count())
             m_pages->setCurrentIndex(index);
     });
-    connect(ui->usingRegionCheckBox, &QCheckBox::toggled, this, &MainWindow::updateModeUi);
 
     setModeButtonsEnabled(true);
+    updateWindowUi();
     updateModeUi();
     updateOutputPathLabel();
     setStateText(QStringLiteral("状态：待机"));
@@ -1060,8 +1097,6 @@ QWidget *MainWindow::createBasicPage()
     m_fullModeButton = makeModeButton(QStringLiteral("全屏"), QStringLiteral("fullModeButton"));
     m_regionModeButton = makeModeButton(QStringLiteral("区域"), QStringLiteral("regionModeButton"));
     m_windowModeButton = makeModeButton(QStringLiteral("窗口"), QStringLiteral("windowModeButton"));
-    m_windowModeButton->setEnabled(false);
-    m_windowModeButton->setToolTip(QStringLiteral("窗口录制将在下一步接入"));
     m_fullModeButton->setChecked(true);
 
     segmentedLayout->addWidget(m_fullModeButton);
@@ -1075,10 +1110,13 @@ QWidget *MainWindow::createBasicPage()
     modeGroup->addButton(m_windowModeButton);
 
     connect(m_fullModeButton, &QPushButton::clicked, this, [this] {
-        ui->usingRegionCheckBox->setChecked(false);
+        setRecordMode(RecordMode::Full);
     });
     connect(m_regionModeButton, &QPushButton::clicked, this, [this] {
-        ui->usingRegionCheckBox->setChecked(true);
+        setRecordMode(RecordMode::Region);
+    });
+    connect(m_windowModeButton, &QPushButton::clicked, this, [this] {
+        setRecordMode(RecordMode::Window);
     });
 
     rangeLayout->addWidget(segmented);
@@ -1108,6 +1146,36 @@ QWidget *MainWindow::createBasicPage()
 
     rangeLayout->addSpacing(8);
     rangeLayout->addWidget(m_regionSelectionRow);
+
+    // 窗口模式的已选窗口行。
+    m_windowSelectionRow = new QWidget;
+    m_windowSelectionRow->setObjectName(QStringLiteral("selectionRow"));
+    m_windowSelectionRow->setAttribute(Qt::WA_StyledBackground, true);
+    m_windowSelectionRow->setFixedHeight(38);
+    auto *windowLayout = new QHBoxLayout(m_windowSelectionRow);
+    windowLayout->setContentsMargins(10, 0, 10, 0);
+    windowLayout->setSpacing(8);
+
+    auto *windowTitle = new QLabel(QStringLiteral("已选窗口"));
+    windowTitle->setObjectName(QStringLiteral("selectionLabel"));
+    m_windowChip = new QLabel(QStringLiteral("未选择"));
+    m_windowChip->setObjectName(QStringLiteral("selectionChip"));
+    m_windowMeta = new QLabel;
+    m_windowMeta->setObjectName(QStringLiteral("selectionMeta"));
+    m_selectWindowButton = new QPushButton(QStringLiteral("选择窗口"));
+    m_selectWindowButton->setObjectName(QStringLiteral("selectWindowButton"));
+
+    windowLayout->addWidget(windowTitle);
+    windowLayout->addWidget(m_windowChip);
+    windowLayout->addWidget(m_windowMeta);
+    windowLayout->addStretch();
+    windowLayout->addWidget(m_selectWindowButton);
+
+    rangeLayout->addSpacing(8);
+    rangeLayout->addWidget(m_windowSelectionRow);
+    m_windowSelectionRow->hide();
+    connect(m_selectWindowButton, &QPushButton::clicked, this, &MainWindow::selectWindow);
+
     panelLayout->addWidget(rangeSection);
     panelLayout->addWidget(makeDivider());
 
@@ -1365,7 +1433,8 @@ void MainWindow::applyStyles()
         "QPushButton#fullModeButton:checked, QPushButton#regionModeButton:checked,"
         " QPushButton#windowModeButton:checked {"
         " background: #FFFFFF; color: #2F6FED; border: 1px solid #C5D7FB; }"
-        "QPushButton#regionButton { border: none; background: transparent; color: #2F6FED;"
+        "QPushButton#regionButton, QPushButton#selectWindowButton {"
+        " border: none; background: transparent; color: #2F6FED;"
         " font-weight: 600; padding: 4px 2px; }"
         "QWidget#selectionRow { background: #F7F8FA; border: 1px solid #E4E8EF; border-radius: 8px; }"
         "QLabel#selectionLabel { font-size: 11px; color: #6B7280; }"
@@ -1431,26 +1500,134 @@ void MainWindow::clearStatusMessage()
 
 void MainWindow::setModeButtonsEnabled(bool enabled)
 {
-    ui->usingRegionCheckBox->setEnabled(enabled);
     if (m_fullModeButton)
         m_fullModeButton->setEnabled(enabled);
     if (m_regionModeButton)
         m_regionModeButton->setEnabled(enabled);
     if (m_windowModeButton)
-        m_windowModeButton->setEnabled(false);
+        m_windowModeButton->setEnabled(enabled);
+    if (m_selectWindowButton)
+        m_selectWindowButton->setEnabled(enabled);
 }
 
 void MainWindow::updateModeUi()
 {
-    const bool region = ui->usingRegionCheckBox->isChecked();
     if (m_fullModeButton)
-        m_fullModeButton->setChecked(!region);
+        m_fullModeButton->setChecked(m_recordMode == RecordMode::Full);
     if (m_regionModeButton)
-        m_regionModeButton->setChecked(region);
+        m_regionModeButton->setChecked(m_recordMode == RecordMode::Region);
     if (m_windowModeButton)
-        m_windowModeButton->setChecked(false);
+        m_windowModeButton->setChecked(m_recordMode == RecordMode::Window);
     if (m_regionSelectionRow)
-        m_regionSelectionRow->setVisible(region);
+        m_regionSelectionRow->setVisible(m_recordMode == RecordMode::Region);
+    if (m_windowSelectionRow)
+        m_windowSelectionRow->setVisible(m_recordMode == RecordMode::Window);
+}
+
+void MainWindow::setRecordMode(RecordMode mode)
+{
+    m_recordMode = mode;
+
+    QSettings settings;
+    settings.setValue("recordingMode",
+        mode == RecordMode::Full ? QStringLiteral("full") :
+        mode == RecordMode::Region ? QStringLiteral("region") :
+                                     QStringLiteral("window"));
+
+    updateModeUi();
+    setStateText(QStringLiteral("状态：待机"));
+
+    if (mode == RecordMode::Region && !m_recordingRegion.isValid())
+        showStatusMessage(QStringLiteral("请先选择区域"));
+    else if (mode == RecordMode::Window && m_selectedWindow.hwnd == 0)
+        showStatusMessage(QStringLiteral("请先选择窗口"));
+    else
+        updateOutputPathLabel();
+}
+
+void MainWindow::selectWindow()
+{
+    WindowPickerDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    m_selectedWindow = dialog.selectedWindow();
+    updateWindowUi();
+    setRecordMode(RecordMode::Window);
+}
+
+void MainWindow::updateWindowUi()
+{
+    if (!m_windowChip || !m_windowMeta || !m_selectWindowButton)
+        return;
+
+    if (m_selectedWindow.hwnd == 0) {
+        m_windowChip->setText(QStringLiteral("未选择"));
+        m_windowMeta->clear();
+        m_selectWindowButton->setText(QStringLiteral("选择窗口"));
+        return;
+    }
+
+    m_windowChip->setText(QStringLiteral("%1 × %2")
+        .arg(m_selectedWindow.clientSize.width())
+        .arg(m_selectedWindow.clientSize.height()));
+    m_windowMeta->setText(QStringLiteral("%1 · %2")
+        .arg(m_selectedWindow.processName)
+        .arg(m_selectedWindow.title));
+    m_selectWindowButton->setText(QStringLiteral("重新选择"));
+}
+
+bool MainWindow::validateSelectedWindow(QString *error) const
+{
+    if (m_selectedWindow.hwnd == 0) {
+        *error = QStringLiteral("请先选择窗口");
+        return false;
+    }
+
+    const HWND hwnd = reinterpret_cast<HWND>(m_selectedWindow.hwnd);
+    if (!IsWindow(hwnd)) {
+        *error = QStringLiteral("目标窗口已关闭");
+        return false;
+    }
+    if (!IsWindowVisible(hwnd)) {
+        *error = QStringLiteral("目标窗口不可见");
+        return false;
+    }
+    if (IsIconic(hwnd)) {
+        *error = QStringLiteral("目标窗口已最小化，请先恢复");
+        return false;
+    }
+
+    RECT client{};
+    if (!GetClientRect(hwnd, &client) ||
+        client.right <= client.left ||
+        client.bottom <= client.top) {
+        *error = QStringLiteral("目标窗口没有可录制的内容区");
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::requestStop(const QString &reason)
+{
+    if (m_ffmpeg.state() != QProcess::Running)
+        return;
+
+    m_windowMonitor.stop();
+    m_stopReason = reason;
+    m_stopElapsed.start();
+    ui->stopButton->setEnabled(false);
+    setStateText(QStringLiteral("状态：正在保存"));
+    if (!reason.isEmpty())
+        showStatusMessage(reason);
+
+    if (m_audioThread && m_audioThread->isRunning()) {
+        m_waitingAudioStop = true;
+        m_audioThread->requestStop();
+    } else {
+        sendStopToFFmpeg();
+    }
+    m_stopTimer.start(15000);
 }
 
 void MainWindow::updateOutputPathLabel()
