@@ -31,6 +31,25 @@ bool canWriteDirectory(const QString &path)
     QTemporaryFile check(QDir(path).filePath("screenRecorder-check-XXXXXX"));
     return check.open();
 }
+struct CaptureRect{
+    int x=0;
+    int y=0;
+    int width=0;
+    int height=0;
+};
+
+// 把Qt逻辑坐标下的捕获矩形换算程gdigrab参数
+// gdigrab的offset 以主显示器左上角为原点，所以先减去主屏逻辑原点，再乘缩放比
+// 宽高取偶，避免yuv420p因奇数尺寸编码失败
+CaptureRect nativeCaptureRect(const QRect &logicalRect,const QRect &primaryRect, qreal dpr)
+{
+    CaptureRect rect;
+    rect.x=qRound((logicalRect.x()-primaryRect.x())*dpr);
+    rect.y=qRound((logicalRect.y()-primaryRect.y())*dpr);
+    rect.width=rec::evenDimension(qRound(logicalRect.width()*dpr));
+    rect.height=rec::evenDimension(qRound(logicalRect.height()*dpr));
+    return rect;
+}
 // 查询 FFmpeg 对指定设备或编码器的支持情况。
 // program 是可执行文件路径；topic 是要查询的 -h 主题；marker 是成功输出标记，即预期在FFmpeg输出中找到的文字；name 给用户看的功能名称，用于拼接错误提示。
 QString checkFFmpegFeature(const QString &program,const QString &topic,const QByteArray &marker,const QString &name)
@@ -92,7 +111,7 @@ QStringList microphoneDevices(const QString &ffmpeg, QString *error)
     return devices;
 }
 // 用 ffprobe 核对 MP4 的视频编码、尺寸和时长；返回空字符串表示通过。
-QString checkVideoFile(const QString &path, const QString &expectedCodec)
+QString checkVideoFile(const QString &path, const QString &expectedCodec,int expectedWidth, int expectedHeight)
 {
     const QString ffprobe = QStandardPaths::findExecutable("ffprobe");
     if(ffprobe.isEmpty())
@@ -142,7 +161,10 @@ QString checkVideoFile(const QString &path, const QString &expectedCodec)
 
     if(!widthOk || !heightOk || width <= 0 || height <= 0)
         return QStringLiteral("视频尺寸无效");
-
+    if(expectedWidth>0&&width!=expectedWidth)
+        return QStringLiteral("视频宽度不符：期望%1，实际%2").arg(expectedWidth).arg(width);
+    if(expectedHeight>0&&height!=expectedHeight)
+        return QStringLiteral("视频高度不符：期望%1，实际%2").arg(expectedHeight).arg(height);
     if(!durationOk || duration <= 0)
         return QStringLiteral("视频时长无效");
     return {}; // 空字符串表示检查通过
@@ -396,7 +418,10 @@ MainWindow::MainWindow(QWidget *parent)
         // 仅在 FFmpeg 正常退出且文件非空时，才用 ffprobe 验证视频流。
         const bool ffmpegSucceeded = exitStatus == QProcess::NormalExit && exitcode ==0 && QFileInfo(m_outputFile).size() > 0;
 
-        QString videoError = ffmpegSucceeded ? checkVideoFile(m_outputFile, m_expectedVideoCodec): QString{};
+        QString videoError = ffmpegSucceeded
+                                 ? checkVideoFile(m_outputFile, m_expectedVideoCodec,
+                                                  m_expectedVideoWidth, m_expectedVideoHeight)
+                                 : QString{};
         // 勾选任一音频来源时，都要求输出包含音频流。
         if (ffmpegSucceeded && videoError.isEmpty() &&
             (ui->microphoneCheckBox->isChecked() || ui->systemAudioCheckBox->isChecked()))
@@ -488,30 +513,31 @@ MainWindow::MainWindow(QWidget *parent)
             "-f", "gdigrab", "-framerate", ui->frameRateComboBox->currentData().toString()
         };
         // 仅在区域模式下，把 Qt 逻辑坐标换算成 FFmpeg 所需的屏幕像素参数。
-        if(ui->usingRegionCheckBox->isChecked()){
-            if(!m_recordingRegion.isValid()){
-                ui->statusLabel->setText(QStringLiteral("状态：请先选择区域"));
-                return;
-            }
-
-            QScreen *screen = QGuiApplication::primaryScreen();
-            const QRect screenRect = screen->geometry();
-            const qreal ratio = screen->devicePixelRatio();
-
-            const int x =qRound((m_recordingRegion.x() - screenRect.x())* ratio);
-            const int y =qRound((m_recordingRegion.y() - screenRect.y())* ratio);
-            int width = qRound(m_recordingRegion.width()*ratio);
-            int height = qRound(m_recordingRegion.height()*ratio);
-
-            // yuv420p 编码时，让宽高保持偶数；最多缩小右边和下边各1像素
-            width -= width % 2;
-            height -= height % 2;
-
-            args<< "-offset_x" << QString::number(x)
-                << "-offset_y"<<QString::number(y)
-                <<"-video_size"
-                <<QStringLiteral("%1x%2").arg(width).arg(height);
+        QScreen *screen = QGuiApplication::primaryScreen();
+        if (!screen) {
+            ui->statusLabel->setText(QStringLiteral("状态：找不到主显示器"));
+            return;
         }
+        const QRect screenRect = screen->geometry();
+        const bool useRegion = ui->usingRegionCheckBox->isChecked();
+        if (useRegion && !m_recordingRegion.isValid()) {
+            ui->statusLabel->setText(QStringLiteral("状态：请先选择区域"));
+            return;
+        }
+        // 全屏也显式指定主屏矩形：desktop 默认可能覆盖整个虚拟桌面，
+        // 多显示器时会录进副屏；显式 offset/video_size 才能保证首版只录主屏。
+        const QRect logicalCapture = useRegion ? m_recordingRegion : screenRect;
+        const CaptureRect capture = nativeCaptureRect(logicalCapture, screenRect,
+                                                      screen->devicePixelRatio());
+        if (capture.width <= 0 || capture.height <= 0) {
+            ui->statusLabel->setText(QStringLiteral("状态：选区太小，无法录制"));
+            return;
+        }
+        args << "-offset_x" << QString::number(capture.x)
+             << "-offset_y" << QString::number(capture.y)
+             << "-video_size" << QStringLiteral("%1x%2").arg(capture.width).arg(capture.height);
+        m_expectedVideoWidth = capture.width;
+        m_expectedVideoHeight = capture.height;
         // 启动前检查目录能否写入，并确定本次录像的完整文件路径。
         if(!canWriteDirectory(m_outputDirectory)){
             ui->statusLabel->setText(QStringLiteral("状态：保存目录不可写，请重新选择"));

@@ -30,6 +30,9 @@ private:
     QProcess m_ffmpeg;
     QString m_outputFile;
     QString m_expectedVideoCodec;
+    // 本次录制期望的视频尺寸（原生像素），用于ffprobe校验画面范围
+    int m_expectedVideoWidth = 0;
+    int m_expectedVideoHeight = 0;
     QString m_pendingProgram;
     QStringList m_pendingArgs;
     int m_countdownRemaining = 0;
