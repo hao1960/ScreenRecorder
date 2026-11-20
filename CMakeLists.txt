@@ -21,6 +21,7 @@ qt_add_executable(screenRecorder
     audiopipe.cpp
     audiotimeline.h
     audiotimeline.cpp
+    recordingparams.h
 )
 
 qt_add_translations(
@@ -33,6 +34,14 @@ target_link_libraries(screenRecorder
         Qt::Core
         Qt::Widgets
 )
+
+# 录制参数表只依赖标准库，测试目标不链接 Qt，也不受平台限制。
+add_executable(recordingparams_test EXCLUDE_FROM_ALL
+    tests/recordingparams_test.cpp
+    recordingparams.h
+)
+set_target_properties(recordingparams_test PROPERTIES AUTOMOC OFF AUTOUIC OFF)
+target_compile_features(recordingparams_test PRIVATE cxx_std_17)
 
 if(WIN32)
     # WASAPI 通过 COM 接口和 Windows 的 GUID 定义访问音频设备。

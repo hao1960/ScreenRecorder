@@ -15,7 +15,11 @@
 #include <QTemporaryFile>
 #include <QComboBox>
 #include <QRegularExpression>
+#include <optional>
+#include <string>
+#include <string_view>
 #include "regionselector.h"
+#include "recordingparams.h"
 
 namespace{
 // 在目标目录试建一个临时文件，离开函数时自动删除
@@ -223,11 +227,12 @@ MainWindow::MainWindow(QWidget *parent)
     });
     // 保存文件配置；读取顺序：上次目录-系统视频目录-用户主目录。旧目录被删时自动回退。无效模式值按全屏处理
     QSettings settings;
-    // 显示文字与实际帧率分开保存，配置无效时回退到 10 fps。
-    ui->frameRateComboBox->setItemData(0, 10);
-    ui->frameRateComboBox->setItemData(1, 15);
-    ui->frameRateComboBox->setItemData(2, 30);
-    const int savedFrameRate = settings.value("frameRate", 10).toInt();
+    // 显示文字由 mainwindow.ui 提供，这里按帧率表填入实际数值，避免两处各写一份。
+    const int frameRateItems = qMin(ui->frameRateComboBox->count(),
+                                    static_cast<int>(rec::kFrameRates.size()));
+    for (int index = 0; index < frameRateItems; ++index)
+        ui->frameRateComboBox->setItemData(index, rec::kFrameRates[static_cast<std::size_t>(index)]);
+    const int savedFrameRate = settings.value("frameRate", rec::kFrameRates.front()).toInt();
     const int frameRateIndex = ui->frameRateComboBox->findData(savedFrameRate);
     ui->frameRateComboBox->setCurrentIndex(frameRateIndex >= 0 ? frameRateIndex : 0);
     connect(ui->frameRateComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -528,12 +533,21 @@ MainWindow::MainWindow(QWidget *parent)
             args << "-f" << "dshow" << "-i" << (QStringLiteral("audio=") + device);
             microphoneAdded = true;
         }
-        const QString quality = ui->qualityComboBox->currentData().toString();
+        // 编码器与画质先解析成枚举：CRF 数值和 ffprobe 期望的编码名都由 recordingparams.h 决定。
+        const std::optional<rec::Encoder> parsedEncoder = rec::encoderFromName(encoder.toStdString());
+        if (!parsedEncoder) {
+            ui->statusLabel->setText(QStringLiteral("状态：编码器名称无法识别"));
+            ui->statusbar->showMessage(QStringLiteral("请重新选择可用编码器"));
+            return;
+        }
+        // 画质选项缺失时沿用旧实现的默认分支，按均衡档处理。
+        const rec::Quality quality = rec::qualityFromName(
+            ui->qualityComboBox->currentData().toString().toStdString())
+            .value_or(rec::Quality::Balanced);
         // x264 与 x265 各自使用质量参数，数值不代表跨编码器的相同画质。
-        const int crf = encoder == "libx265"
-            ? (quality == "high" ? 23 : quality == "small" ? 33 : 28)
-            : (quality == "high" ? 18 : quality == "small" ? 28 : 23);
-        m_expectedVideoCodec = encoder == "libx265" ? "hevc" : "h264";
+        const int crf = rec::qualityCrf(*parsedEncoder, quality);
+        const std::string_view codecName = rec::expectedVideoCodec(*parsedEncoder);
+        m_expectedVideoCodec = QString::fromLatin1(codecName.data(), static_cast<int>(codecName.size()));
 
         // 映射与编码参数（输出文件除外）：视频恒为输入 0，麦克风为 1，管道音频顺延。
         const bool systemAudioWanted = ui->systemAudioCheckBox->isChecked();
