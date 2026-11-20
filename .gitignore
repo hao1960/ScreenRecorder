@@ -82,3 +82,9 @@ CMakeLists.txt.user*
 .uic/
 /build*/
 /.qtcreator/
+/dist/
+/vendor/ffmpeg/*.zip
+/vendor/ffmpeg/*.7z
+
+# 项目自己的 Windows 资源脚本（上面的 *.rc 是通用忽略规则）
+!/resources/app.rc

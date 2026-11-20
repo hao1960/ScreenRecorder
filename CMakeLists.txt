@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(screenRecorder LANGUAGES CXX)
+project(screenRecorder VERSION 0.1.0 LANGUAGES CXX)
 
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Widgets LinguistTools)
 
@@ -28,6 +28,16 @@ qt_add_executable(screenRecorder
     recordingparams.h
     windowtitlebar.h
     windowtitlebar.cpp
+    resources/app.qrc
+)
+
+if(WIN32)
+    # Windows 可执行文件图标和版本信息；MinGW 的 windres 会编译这个文件。
+    target_sources(screenRecorder PRIVATE resources/app.rc resources/app.ico)
+endif()
+
+target_compile_definitions(screenRecorder PRIVATE
+    SCREENRECORDER_VERSION="${PROJECT_VERSION}"
 )
 
 qt_add_translations(
@@ -135,6 +145,7 @@ install(TARGETS screenRecorder
 qt_generate_deploy_app_script(
     TARGET screenRecorder
     OUTPUT_SCRIPT deploy_script
+    NO_TRANSLATIONS
     NO_UNSUPPORTED_PLATFORM_ERROR
 )
 install(SCRIPT ${deploy_script})

@@ -1,0 +1,59 @@
+ScreenRecorder 0.1.0 - Third-party notices
+==========================================
+
+This installer bundles third-party software. The notices below are provided
+with the application. This file is not legal advice; verify the obligations
+for your distribution with the upstream projects.
+
+1. FFmpeg 8.0.1 (bundled ffmpeg.exe and ffprobe.exe)
+----------------------------------------------------
+The bundled FFmpeg build is:
+  ffmpeg version 8.0.1-full_build-www.gyan.dev
+  configured with --enable-gpl (includes libx264/libx265 and other GPL parts)
+
+Because this build is configured with --enable-gpl, the FFmpeg binaries are
+distributed under the GNU General Public License version 3 (GPLv3), not the
+LGPL. FFmpeg copyright belongs to the FFmpeg developers.
+
+License text:
+  https://www.gnu.org/licenses/gpl-3.0.txt
+
+Corresponding source code:
+  FFmpeg 8.0.1 source: https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz
+  Build information:   https://www.gyan.dev/ffmpeg/builds/
+  The exact source archive used for this release is attached to the
+  v0.1.0 GitHub release:
+  https://github.com/hao1960/ScreenRecorder/releases/tag/v0.1.0
+
+Written offer: for at least three years after this release, the project
+maintainer will provide the complete corresponding source code for the
+bundled FFmpeg binaries on request through:
+  https://github.com/hao1960/ScreenRecorder/issues
+
+2. Qt 6.8.2
+-----------
+The application dynamically links to Qt 6.8.2 (Core, Gui, Widgets, Svg and
+runtime plugins). Qt is available under the GNU Lesser General Public License
+version 3 (LGPLv3) and other licenses. The Qt DLLs are deployed unchanged and
+can be replaced by the user. Qt copyright belongs to The Qt Company and
+contributors.
+
+License information:
+  https://www.qt.io/licensing/open-source-lgpl-obligations
+  https://www.gnu.org/licenses/lgpl-3.0.txt
+Source code:
+  https://download.qt.io/official_releases/qt/6.8/6.8.2/single/
+
+3. MinGW-w64 runtime
+--------------------
+The installer includes libgcc_s_seh-1.dll, libstdc++-6.dll and
+libwinpthread-1.dll from the MinGW-w64/GCC runtime. These are distributed
+under the GCC Runtime Library Exception and related licenses:
+  https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html
+  https://www.mingw-w64.org/
+
+4. Application code
+-------------------
+ScreenRecorder application code is licensed under the MIT License; see
+LICENSE.txt. The MIT license does not replace the licenses of the bundled
+third-party components above.

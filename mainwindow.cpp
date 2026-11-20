@@ -49,6 +49,16 @@
 #include "recordingparams.h"
 
 namespace{
+// 安装包会把 ffmpeg/ffprobe 放在 exe 旁边；先找同目录，再回退到 PATH。
+QString findBundledExecutable(const QString &name)
+{
+    const QString local = QDir(QCoreApplication::applicationDirPath())
+        .filePath(name + QStringLiteral(".exe"));
+    if (QFileInfo(local).isFile())
+        return local;
+    return QStandardPaths::findExecutable(name);
+}
+
 // 在目标目录试建一个临时文件，离开函数时自动删除
 bool canWriteDirectory(const QString &path)
 {
@@ -140,7 +150,7 @@ QStringList microphoneDevices(const QString &ffmpeg, QString *error)
 // 用 ffprobe 核对 MP4 的视频编码、尺寸和时长；返回空字符串表示通过。
 QString checkVideoFile(const QString &path, const QString &expectedCodec,int expectedWidth, int expectedHeight)
 {
-    const QString ffprobe = QStandardPaths::findExecutable("ffprobe");
+    const QString ffprobe = findBundledExecutable("ffprobe");
     if(ffprobe.isEmpty())
         return QStringLiteral("找不到 ffprobe，无法验证视频");
     QProcess probe;
@@ -200,7 +210,7 @@ QString checkVideoFile(const QString &path, const QString &expectedCodec,int exp
 // 用户选择麦克风时，还需确认输出文件包含音频流。
 QString checkAudioFile(const QString &path)
 {
-    const QString ffprobe = QStandardPaths::findExecutable("ffprobe");
+    const QString ffprobe = findBundledExecutable("ffprobe");
     if (ffprobe.isEmpty())
         return QStringLiteral("找不到 ffprobe，无法验证音频");
     QProcess probe;
@@ -343,7 +353,7 @@ MainWindow::MainWindow(QWidget *parent)
     // 只展示当前 FFmpeg 支持的编码器，保存的编码器失效时要求用户重新选择。
     ui->encoderComboBox->clear();
     ui->encoderComboBox->addItem(QStringLiteral("请选择可用编码器"));
-    const QString ffmpegPath = QStandardPaths::findExecutable("ffmpeg");
+    const QString ffmpegPath = findBundledExecutable("ffmpeg");
     if (!ffmpegPath.isEmpty()) {
         if (checkFFmpegFeature(ffmpegPath, "encoder=libx264", "Encoder libx264 [", QStringLiteral("H.264")).isEmpty())
             ui->encoderComboBox->addItem(QStringLiteral("H.264（libx264）"), QStringLiteral("libx264"));
@@ -384,7 +394,7 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
         QString error;
-        const QStringList devices = microphoneDevices(QStandardPaths::findExecutable("ffmpeg"), &error);
+        const QStringList devices = microphoneDevices(findBundledExecutable("ffmpeg"), &error);
         if (devices.isEmpty()) {
             ui->microphoneComboBox->addItem(QStringLiteral("无可用麦克风"));
             ui->microphoneComboBox->setEnabled(false);
@@ -572,8 +582,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_stopReason.clear();
         m_windowMonitor.stop();
 
-        const QString ffmpeg = QStandardPaths::findExecutable(
-            QStringLiteral("ffmpeg"));
+        const QString ffmpeg = findBundledExecutable(QStringLiteral("ffmpeg"));
         if(ffmpeg.isEmpty()){
             setStateText(QStringLiteral("状态：找不到FFmpeg"));
             ui->regionButton->setEnabled(true);
@@ -1019,7 +1028,10 @@ WindowTitleBar *MainWindow::createTitleBar()
     name->setFont(nameFont);
     brandLayout->addWidget(name);
 
-    auto *version = new QLabel(QStringLiteral("V0.3"));
+    const QString versionText = QCoreApplication::applicationVersion();
+    auto *version = new QLabel(versionText.isEmpty()
+        ? QStringLiteral("V0.1.0")
+        : QStringLiteral("V%1").arg(versionText));
     version->setObjectName(QStringLiteral("versionBadge"));
     brandLayout->addWidget(version);
 
