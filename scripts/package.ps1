@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Version = "0.1.0",
     [string]$QtRoot = "E:\QT\6.8.2\mingw_64",
     [string]$MinGWRoot = "E:\QT\Tools\mingw1310_64",
