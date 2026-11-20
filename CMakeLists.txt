@@ -13,6 +13,10 @@ qt_add_executable(screenRecorder
     mainwindow.ui
     regionselector.h
     regionselector.cpp
+    windowenumerator.h
+    windowenumerator.cpp
+    windowpickerdialog.h
+    windowpickerdialog.cpp
     systemaudio.h
     systemaudio.cpp
     systemaudiothread.h
@@ -22,6 +26,8 @@ qt_add_executable(screenRecorder
     audiotimeline.h
     audiotimeline.cpp
     recordingparams.h
+    windowtitlebar.h
+    windowtitlebar.cpp
 )
 
 qt_add_translations(
@@ -46,6 +52,27 @@ target_compile_features(recordingparams_test PRIVATE cxx_std_17)
 if(WIN32)
     # WASAPI 通过 COM 接口和 Windows 的 GUID 定义访问音频设备。
     target_link_libraries(screenRecorder PRIVATE ole32 uuid)
+    # 窗口枚举用 DWM 的 cloaked 标记过滤 UWP 隐藏窗口。
+    target_link_libraries(screenRecorder PRIVATE dwmapi)
+    # 窗口枚举探针：验证 EnumWindows 过滤和 Unicode 标题，不进入主程序。
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/window_enum_test.cpp")
+        add_executable(window_enum_test EXCLUDE_FROM_ALL
+            build/window_enum_test.cpp
+        )
+        set_target_properties(window_enum_test PROPERTIES AUTOMOC OFF AUTOUIC OFF)
+        target_compile_features(window_enum_test PRIVATE cxx_std_17)
+        target_link_libraries(window_enum_test PRIVATE user32 dwmapi)
+    endif()
+    # 窗口选择对话框的独立测试入口；不依赖主窗口，方便单独打开检查列表。
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/window_picker_test.cpp")
+        add_executable(window_picker_test EXCLUDE_FROM_ALL
+            build/window_picker_test.cpp
+            windowenumerator.h windowenumerator.cpp
+            windowpickerdialog.h windowpickerdialog.cpp
+        )
+        target_link_libraries(window_picker_test PRIVATE Qt::Core Qt::Widgets user32 dwmapi)
+        target_include_directories(window_picker_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
     # build 下的手动测试不随仓库分发；源码存在时才创建对应目标。
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/wasapi_thread_test.cpp")
         add_executable(wasapi_thread_test EXCLUDE_FROM_ALL

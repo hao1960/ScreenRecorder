@@ -1,5 +1,23 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
+#include "windowtitlebar.h"
+
+#include <QFont>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPainter>
+#include <QPen>
+#include <QPixmap>
+#include <QPushButton>
+#include <QSizeGrip>
+#include <QStackedWidget>
+#include <QStatusBar>
+#include <QTabBar>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <QButtonGroup>
+#include <QCheckBox>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -192,6 +210,45 @@ QString checkAudioFile(const QString &path)
         return QStringLiteral("未检测到有效音频流，请检查音频设备");
     return {};
 }
+// 用 QPainter 画一个 24×24 坐标系的“显示器 + 红色录制点”，
+// 不依赖 QtSvg 或外部图片；最后按 size 缩放成 QPixmap。
+QPixmap makeAppIconPixmap(int size)
+{
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.scale(size / 24.0, size / 24.0);
+
+    painter.setPen(QPen(QColor(0x1F, 0x29, 0x37), 1.6));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRoundedRect(QRectF(3, 4, 18, 13), 2, 2);
+    painter.drawLine(QPointF(9, 21), QPointF(15, 21));
+    painter.drawLine(QPointF(12, 17), QPointF(12, 21));
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0xE5, 0x48, 0x4D));
+    painter.drawEllipse(QPointF(12, 10.5), 3.0, 3.0);
+
+    return pixmap;
+}
+
+// 单面板里用 1px 分隔线分段，避免堆太多卡片。
+QFrame *makeDivider()
+{
+    auto *line = new QFrame;
+    line->setObjectName(QStringLiteral("divider"));
+    line->setFixedHeight(1);
+    return line;
+}
+
+QLabel *makeSectionTitle(const QString &text)
+{
+    auto *label = new QLabel(text);
+    label->setObjectName(QStringLiteral("sectionTitle"));
+    return label;
+}
 }
 
 MainWindow::MainWindow(QWidget *parent)
@@ -199,7 +256,15 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
-    ui->usingRegionCheckBox->setEnabled(true);
+    setWindowTitle(QStringLiteral("ScreenRecorder"));
+    // 无边框窗口：标题栏、移动、缩放由于我们自己接管
+    setWindowFlag(Qt::FramelessWindowHint,true);
+    setMinimumSize(900,620);
+    resize(900,620);
+    ui->menubar->hide();
+    buildUi();
+
+    setModeButtonsEnabled(true);
     ui->stopButton->setEnabled(false);
     ui->chooseOutputDirectoryButton->setEnabled(true);
     ui->cancelCountdownButton->setEnabled(false);
@@ -213,12 +278,13 @@ MainWindow::MainWindow(QWidget *parent)
     m_countdownTimer.setTimerType(Qt::PreciseTimer);
     connect(&m_countdownTimer, &QTimer::timeout, this, [this] {
         if (--m_countdownRemaining > 0) {
-            ui->statusLabel->setText(QStringLiteral("状态：%1 秒后开始录制").arg(m_countdownRemaining));
+            setStateText(QStringLiteral("状态：%1 秒后开始录制").arg(m_countdownRemaining));
             return;
         }
         m_countdownTimer.stop();
         ui->cancelCountdownButton->setEnabled(false);
-        ui->statusLabel->setText(QStringLiteral("状态：准备中"));
+        ui->cancelCountdownButton->setVisible(false);
+        setStateText(QStringLiteral("状态：准备中"));
         m_ffmpeg.start(m_pendingProgram, m_pendingArgs);
         m_pendingProgram.clear();
         m_pendingArgs.clear();
@@ -232,11 +298,12 @@ MainWindow::MainWindow(QWidget *parent)
         m_outputFile.clear();
         m_waitingAudioStop = false;
         cleanupAudioThread(); // 倒计时取消时管道尚未连接，线程会被取消并等待退出。
-        ui->statusLabel->setText(QStringLiteral("状态：倒计时已取消"));
+        setStateText(QStringLiteral("状态：倒计时已取消"));
         ui->cancelCountdownButton->setEnabled(false);
+        ui->cancelCountdownButton->setVisible(false);
         ui->startButton->setEnabled(true);
         ui->regionButton->setEnabled(true);
-        ui->usingRegionCheckBox->setEnabled(true);
+        setModeButtonsEnabled(true);
         ui->chooseOutputDirectoryButton->setEnabled(true);
         ui->frameRateComboBox->setEnabled(true);
         ui->encoderComboBox->setEnabled(true);
@@ -252,8 +319,11 @@ MainWindow::MainWindow(QWidget *parent)
     // 显示文字由 mainwindow.ui 提供，这里按帧率表填入实际数值，避免两处各写一份。
     const int frameRateItems = qMin(ui->frameRateComboBox->count(),
                                     static_cast<int>(rec::kFrameRates.size()));
-    for (int index = 0; index < frameRateItems; ++index)
-        ui->frameRateComboBox->setItemData(index, rec::kFrameRates[static_cast<std::size_t>(index)]);
+    for (int index = 0; index < frameRateItems; ++index) {
+        const int rate = rec::kFrameRates[static_cast<std::size_t>(index)];
+        ui->frameRateComboBox->setItemData(index, rate);
+        ui->frameRateComboBox->setItemText(index, QStringLiteral("%1 fps").arg(rate));
+    }
     const int savedFrameRate = settings.value("frameRate", rec::kFrameRates.front()).toInt();
     const int frameRateIndex = ui->frameRateComboBox->findData(savedFrameRate);
     ui->frameRateComboBox->setCurrentIndex(frameRateIndex >= 0 ? frameRateIndex : 0);
@@ -274,7 +344,7 @@ MainWindow::MainWindow(QWidget *parent)
     const int encoderIndex = ui->encoderComboBox->findData(settings.value("videoEncoder", "libx264"));
     ui->encoderComboBox->setCurrentIndex(encoderIndex >= 0 ? encoderIndex : 0);
     if (encoderIndex < 0)
-        ui->statusbar->showMessage(QStringLiteral("已保存的编码器不可用，请选择可用编码器"));
+        showStatusMessage(QStringLiteral("已保存的编码器不可用，请选择可用编码器"));
     connect(ui->encoderComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
         if (ui->encoderComboBox->currentData().isValid()) {
             QSettings settings;
@@ -283,9 +353,9 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     ui->qualityComboBox->clear();
-    ui->qualityComboBox->addItem(QStringLiteral("画质：较高"), QStringLiteral("high"));
-    ui->qualityComboBox->addItem(QStringLiteral("画质：均衡"), QStringLiteral("balanced"));
-    ui->qualityComboBox->addItem(QStringLiteral("画质：较小文件"), QStringLiteral("small"));
+    ui->qualityComboBox->addItem(QStringLiteral("较高"), QStringLiteral("high"));
+    ui->qualityComboBox->addItem(QStringLiteral("均衡"), QStringLiteral("balanced"));
+    ui->qualityComboBox->addItem(QStringLiteral("较小文件"), QStringLiteral("small"));
     const int qualityIndex = ui->qualityComboBox->findData(settings.value("videoQuality", "balanced"));
     ui->qualityComboBox->setCurrentIndex(qualityIndex >= 0 ? qualityIndex : 1);
     connect(ui->qualityComboBox, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -309,7 +379,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (devices.isEmpty()) {
             ui->microphoneComboBox->addItem(QStringLiteral("无可用麦克风"));
             ui->microphoneComboBox->setEnabled(false);
-            ui->statusbar->showMessage(error);
+            showStatusMessage(error);
             return;
         }
         const QString savedDevice = settings.value("microphoneDevice").toString();
@@ -344,20 +414,19 @@ MainWindow::MainWindow(QWidget *parent)
         }
     }
     // 显示最终选用的保存目录；仅展示时换成 Windows 常见的反斜杠。
-    ui->outputDirectoryLabel->setText(
-        m_outputDirectory.isEmpty()
-            ?QStringLiteral("保存目录：未设置")
-            :QStringLiteral("保存目录：%1").arg(QDir::toNativeSeparators(m_outputDirectory)));
+    updateOutputPathLabel();
 
     const QString mode = settings.value("recordingMode","full").toString();
     ui->usingRegionCheckBox->setChecked(mode == "region");
-    if(mode == "region")
-        ui->statusLabel->setText(QStringLiteral("状态：请重新选择区域"));
+    if (mode == "region") {
+        setStateText(QStringLiteral("状态：待机"));
+        showStatusMessage(QStringLiteral("请先选择区域"));
+    }
 
 
     // FFmpeg 真正启动后，更新状态并允许停止。
     connect(&m_ffmpeg,&QProcess::started,this,[this](){
-        ui->statusLabel->setText(QStringLiteral("状态：录制中"));
+        setStateText(QStringLiteral("状态：录制中"));
         ui->stopButton->setEnabled(true);
     });
     // FFmpeg 启动失败时恢复按钮，并显示错误原因。
@@ -366,10 +435,10 @@ MainWindow::MainWindow(QWidget *parent)
             m_waitingAudioStop = false;
             cleanupAudioThread();
             ui->startButton->setEnabled(true);
-            ui->statusLabel->setText(QStringLiteral("状态：启动失败"));
-            ui->statusbar->showMessage(m_ffmpeg.errorString());
+            setStateText(QStringLiteral("状态：启动失败"));
+            showStatusMessage(m_ffmpeg.errorString());
             ui->regionButton->setEnabled(true);
-            ui->usingRegionCheckBox->setEnabled(true);
+            setModeButtonsEnabled(true);
             ui->chooseOutputDirectoryButton->setEnabled(true);
             ui->frameRateComboBox->setEnabled(true);
             ui->encoderComboBox->setEnabled(true);
@@ -396,10 +465,12 @@ MainWindow::MainWindow(QWidget *parent)
 
         ui->startButton->setEnabled(true);
         ui->stopButton->setEnabled(false);
+        ui->cancelCountdownButton->setEnabled(false);
+        ui->cancelCountdownButton->setVisible(false);
         // 录制结束后允许再次选择区域。
         ui->regionButton->setEnabled(true);
         // 录制结束后允许切换全屏/区域模式，即使当前尚未选区。
-        ui->usingRegionCheckBox->setEnabled(true);
+        setModeButtonsEnabled(true);
         ui->chooseOutputDirectoryButton->setEnabled(true);
         ui->frameRateComboBox->setEnabled(true);
         ui->encoderComboBox->setEnabled(true);
@@ -410,8 +481,8 @@ MainWindow::MainWindow(QWidget *parent)
         ui->countdownCheckBox->setEnabled(true);
         ui->countdownSecondsComboBox->setEnabled(ui->countdownCheckBox->isChecked());
         if(timedOut){
-            ui->statusLabel->setText(QStringLiteral("状态：停止超时"));
-            ui->statusbar->showMessage(QStringLiteral("FFmpeg 已被强制结束，文件可能无法播放：%1").arg(m_outputFile));
+            setStateText(QStringLiteral("状态：停止超时"));
+            showStatusMessage(QStringLiteral("FFmpeg 已被强制结束，文件可能无法播放：%1").arg(m_outputFile));
             return;
         }
 
@@ -430,15 +501,15 @@ MainWindow::MainWindow(QWidget *parent)
         const bool success = ffmpegSucceeded && videoError.isEmpty();
 
         if(success){
-            ui->statusLabel->setText(QStringLiteral("状态：录制完成"));
-            ui->statusbar->showMessage(QStringLiteral("文件：")+ m_outputFile);
+            setStateText(QStringLiteral("状态：录制完成"));
+            showStatusMessage(QStringLiteral("文件：")+ m_outputFile);
         }
         else if(ffmpegSucceeded){
-            ui->statusLabel->setText(QStringLiteral("状态：文件验证未通过"));
-            ui->statusbar->showMessage(videoError + QStringLiteral("；文件：")+m_outputFile);
+            setStateText(QStringLiteral("状态：文件验证未通过"));
+            showStatusMessage(videoError + QStringLiteral("；文件：")+m_outputFile);
         }
         else{
-            ui->statusLabel->setText(QStringLiteral("状态：录制失败"));
+            setStateText(QStringLiteral("状态：录制失败"));
             const QString error = QString::fromUtf8(
                 m_ffmpeg.readAllStandardError()).trimmed();
             const QString firstLine = error.section('\n', 0, 0).trimmed();
@@ -472,7 +543,7 @@ MainWindow::MainWindow(QWidget *parent)
             } else {
                 message += QStringLiteral("；未生成视频文件");
             }
-            ui->statusbar->showMessage(message);
+            showStatusMessage(message);
         }
     });
     // 点击开始：定位 FFmpeg、构造参数，然后异步启动录制进程。
@@ -483,20 +554,20 @@ MainWindow::MainWindow(QWidget *parent)
         const QString ffmpeg = QStandardPaths::findExecutable(
             QStringLiteral("ffmpeg"));
         if(ffmpeg.isEmpty()){
-            ui->statusLabel->setText(QStringLiteral("状态：找不到FFmpeg"));
+            setStateText(QStringLiteral("状态：找不到FFmpeg"));
             ui->regionButton->setEnabled(true);
             return;
         }
         const QString captureError = checkFFmpegFeature(ffmpeg,"demuxer=gdigrab","Demuxer gdigrab [",QStringLiteral("Windows 屏幕捕获 gdigrab"));
         if(!captureError.isEmpty()){
-            ui->statusLabel->setText(QStringLiteral("状态：环境检查失败"));
-            ui->statusbar->showMessage(captureError);
+            setStateText(QStringLiteral("状态：环境检查失败"));
+            showStatusMessage(captureError);
             return;
         }
 
         const QString encoder = ui->encoderComboBox->currentData().toString();
         if (encoder.isEmpty()) {
-            ui->statusLabel->setText(QStringLiteral("状态：请选择可用编码器"));
+            setStateText(QStringLiteral("状态：请选择可用编码器"));
             return;
         }
         const QString encoderError = checkFFmpegFeature(
@@ -504,8 +575,8 @@ MainWindow::MainWindow(QWidget *parent)
             QByteArray("Encoder ") + encoder.toUtf8() + " [", encoder);
 
         if(!encoderError.isEmpty()){
-            ui->statusLabel->setText(QStringLiteral("状态：环境检查失败"));
-            ui->statusbar->showMessage(encoderError);
+            setStateText(QStringLiteral("状态：环境检查失败"));
+            showStatusMessage(encoderError);
             return;
         }
         QStringList args{
@@ -515,13 +586,13 @@ MainWindow::MainWindow(QWidget *parent)
         // 仅在区域模式下，把 Qt 逻辑坐标换算成 FFmpeg 所需的屏幕像素参数。
         QScreen *screen = QGuiApplication::primaryScreen();
         if (!screen) {
-            ui->statusLabel->setText(QStringLiteral("状态：找不到主显示器"));
+            setStateText(QStringLiteral("状态：找不到主显示器"));
             return;
         }
         const QRect screenRect = screen->geometry();
         const bool useRegion = ui->usingRegionCheckBox->isChecked();
         if (useRegion && !m_recordingRegion.isValid()) {
-            ui->statusLabel->setText(QStringLiteral("状态：请先选择区域"));
+            setStateText(QStringLiteral("状态：请先选择区域"));
             return;
         }
         // 全屏也显式指定主屏矩形：desktop 默认可能覆盖整个虚拟桌面，
@@ -530,7 +601,7 @@ MainWindow::MainWindow(QWidget *parent)
         const CaptureRect capture = nativeCaptureRect(logicalCapture, screenRect,
                                                       screen->devicePixelRatio());
         if (capture.width <= 0 || capture.height <= 0) {
-            ui->statusLabel->setText(QStringLiteral("状态：选区太小，无法录制"));
+            setStateText(QStringLiteral("状态：选区太小，无法录制"));
             return;
         }
         args << "-offset_x" << QString::number(capture.x)
@@ -540,7 +611,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_expectedVideoHeight = capture.height;
         // 启动前检查目录能否写入，并确定本次录像的完整文件路径。
         if(!canWriteDirectory(m_outputDirectory)){
-            ui->statusLabel->setText(QStringLiteral("状态：保存目录不可写，请重新选择"));
+            setStateText(QStringLiteral("状态：保存目录不可写，请重新选择"));
             return;
         }
         m_outputFile = nextOutputFilePath();
@@ -552,8 +623,8 @@ MainWindow::MainWindow(QWidget *parent)
         if (ui->microphoneCheckBox->isChecked()) {
             const QString device = ui->microphoneComboBox->currentData().toString();
             if (device.isEmpty()) {
-                ui->statusLabel->setText(QStringLiteral("状态：请选择可用麦克风"));
-                ui->statusbar->showMessage(QStringLiteral("重新勾选麦克风可刷新设备列表"));
+                setStateText(QStringLiteral("状态：请选择可用麦克风"));
+                showStatusMessage(QStringLiteral("重新勾选麦克风可刷新设备列表"));
                 return;
             }
             args << "-f" << "dshow" << "-i" << (QStringLiteral("audio=") + device);
@@ -562,8 +633,8 @@ MainWindow::MainWindow(QWidget *parent)
         // 编码器与画质先解析成枚举：CRF 数值和 ffprobe 期望的编码名都由 recordingparams.h 决定。
         const std::optional<rec::Encoder> parsedEncoder = rec::encoderFromName(encoder.toStdString());
         if (!parsedEncoder) {
-            ui->statusLabel->setText(QStringLiteral("状态：编码器名称无法识别"));
-            ui->statusbar->showMessage(QStringLiteral("请重新选择可用编码器"));
+            setStateText(QStringLiteral("状态：编码器名称无法识别"));
+            showStatusMessage(QStringLiteral("请重新选择可用编码器"));
             return;
         }
         // 画质选项缺失时沿用旧实现的默认分支，按均衡档处理。
@@ -593,11 +664,11 @@ MainWindow::MainWindow(QWidget *parent)
                      << "-pix_fmt"<<"yuv420p";
 
         ui->startButton->setEnabled(false);
-        ui->statusLabel->setText(QStringLiteral("状态：准备中"));
-        ui->statusbar->clearMessage();
+        setStateText(QStringLiteral("状态：准备中"));
+        clearStatusMessage();
         // 录制前禁用区域选择，避免遮罩进入录制
         ui->regionButton->setEnabled(false);
-        ui->usingRegionCheckBox->setEnabled(false);
+        setModeButtonsEnabled(false);
         // 开始录制时，禁用选择保存目录地址
         ui->chooseOutputDirectoryButton->setEnabled(false);
         ui->frameRateComboBox->setEnabled(false);
@@ -643,13 +714,13 @@ MainWindow::MainWindow(QWidget *parent)
                 m_waitingAudioStop = false;
                 const bool recording = m_ffmpeg.state() == QProcess::Running;
                 cleanupAudioThread();
-                ui->statusbar->showMessage(QStringLiteral("系统声音采集失败：%1").arg(message));
+                showStatusMessage(QStringLiteral("系统声音采集失败：%1").arg(message));
                 if (!recording) {
                     // FFmpeg 尚未启动：整体中止本次录制，恢复界面。
-                    ui->statusLabel->setText(QStringLiteral("状态：启动失败"));
+                    setStateText(QStringLiteral("状态：启动失败"));
                     ui->startButton->setEnabled(true);
                     ui->regionButton->setEnabled(true);
-                    ui->usingRegionCheckBox->setEnabled(true);
+                    setModeButtonsEnabled(true);
                     ui->chooseOutputDirectoryButton->setEnabled(true);
                     ui->frameRateComboBox->setEnabled(true);
                     ui->encoderComboBox->setEnabled(true);
@@ -665,7 +736,7 @@ MainWindow::MainWindow(QWidget *parent)
                 if (wasWaitingStop && m_ffmpeg.state() == QProcess::Running)
                     sendStopToFFmpeg();
             });
-            ui->statusLabel->setText(QStringLiteral("状态：准备中（启动系统声音）"));
+            setStateText(QStringLiteral("状态：准备中（启动系统声音）"));
             m_audioThread->startCapture();
             return;
         }
@@ -680,7 +751,7 @@ MainWindow::MainWindow(QWidget *parent)
 
         m_stopElapsed.start();
         ui->stopButton->setEnabled(false);
-        ui->statusLabel->setText(QStringLiteral("状态：正在保存"));
+        setStateText(QStringLiteral("状态：正在保存"));
         if (m_audioThread && m_audioThread->isRunning()) {
             // 先写完停止时刻之前的音频，再由 captureStopped 回调给 FFmpeg 发 q。
             m_waitingAudioStop = true;
@@ -704,10 +775,11 @@ MainWindow::MainWindow(QWidget *parent)
         m_recordingRegion = region;
         // 用户确认新选区后，切换到区域模式；选区本身保存在 m_recordingRegion。
         ui->usingRegionCheckBox->setChecked(true);
-        ui->statusLabel->setText(
-            QStringLiteral("已选区域，x=%1 y=%2 宽=%3 高=%4")
-            .arg(region.x()).arg(region.y())
-            .arg(region.width()).arg(region.height()));
+        m_regionChip->setText(QStringLiteral("%1 × %2").arg(region.width()).arg(region.height()));
+        m_regionMeta->setText(QStringLiteral("x=%1, y=%2").arg(region.x()).arg(region.y()));
+        ui->regionButton->setText(QStringLiteral("重新选择"));
+        setStateText(QStringLiteral("状态：待机"));
+        updateOutputPathLabel();
     });
 
 
@@ -719,28 +791,31 @@ MainWindow::MainWindow(QWidget *parent)
             return;// 用户取消
 
         if(!canWriteDirectory(selected)){
-            ui->statusLabel->setText(QStringLiteral("状态：该目录不可写"));
+            setStateText(QStringLiteral("状态：该目录不可写"));
             return;
         }
 
         m_outputDirectory = QDir(selected).absolutePath();
-        // 只把显示给用户的路径改成 Windows 常见的 \，例如 E:/video → E:\video
-        ui->outputDirectoryLabel->setText(QStringLiteral("保存目录：%1").arg(QDir::toNativeSeparators(m_outputDirectory)));
+        updateOutputPathLabel();
 
         QSettings settings;
         settings.setValue("outputDirectory",m_outputDirectory);
         // 重新更新状态文字
-        ui->statusLabel->setText(
-            // 勾选区域录制&&还没有有效录制矩形
-            ui->usingRegionCheckBox->isChecked()&&!m_recordingRegion.isValid()
-                ?QStringLiteral("状态：请先选择区域")
-                :QStringLiteral("状态：待机"));
+        setStateText(QStringLiteral("状态：待机"));
+        if (ui->usingRegionCheckBox->isChecked() && !m_recordingRegion.isValid())
+            showStatusMessage(QStringLiteral("请先选择区域"));
+        else
+            updateOutputPathLabel();
     });
     // toggled 发出新的勾选状态；useRegion=true 代表区域模式，false 代表全屏模式。
     connect(ui->usingRegionCheckBox,&QCheckBox::toggled,this,[this](bool useRegion){
         QSettings settings;
         settings.setValue("recordingMode",useRegion?"region":"full");
-        ui->statusLabel->setText(useRegion && !m_recordingRegion.isValid()?QStringLiteral("状态：请先选择区域"):QStringLiteral("状态：待机"));
+        setStateText(QStringLiteral("状态：待机"));
+        if (useRegion && !m_recordingRegion.isValid())
+            showStatusMessage(QStringLiteral("请先选择区域"));
+        else
+            updateOutputPathLabel();
     });
 
     // 避免 FFmpeg 无响应时界面一直停留在“正在保存”。
@@ -764,13 +839,13 @@ MainWindow::~MainWindow()
 void MainWindow::closeEvent(QCloseEvent*event){
     if(m_ffmpeg.state() != QProcess::NotRunning){
         event->ignore();
-        ui->statusLabel->setText(QStringLiteral("状态：请先停止录制，等待保存完成后退出"));
+        setStateText(QStringLiteral("状态：请先停止录制，等待保存完成后退出"));
         return;
     }
     if(m_audioThread){
         // 采集线程可能在等倒计时或管道连接，直接关闭会遗留工作线程。
         event->ignore();
-        ui->statusLabel->setText(QStringLiteral("状态：请先取消或完成本次录制"));
+        setStateText(QStringLiteral("状态：请先取消或完成本次录制"));
         return;
     }
     QMainWindow::closeEvent(event);
@@ -805,8 +880,9 @@ void MainWindow::launchRecording(const QString &program, const QStringList &args
         m_pendingProgram = program;
         m_pendingArgs = args;
         m_countdownRemaining = ui->countdownSecondsComboBox->currentData().toInt();
-        ui->statusLabel->setText(QStringLiteral("状态：%1 秒后开始录制").arg(m_countdownRemaining));
+        setStateText(QStringLiteral("状态：%1 秒后开始录制").arg(m_countdownRemaining));
         ui->cancelCountdownButton->setEnabled(true);
+        ui->cancelCountdownButton->setVisible(true);
         m_countdownTimer.start();
     } else {
         m_ffmpeg.start(program, args);
@@ -824,4 +900,568 @@ QString MainWindow::nextOutputFilePath() const {
         path = dir.filePath(QStringLiteral("%1-%2.mp4").arg(base).arg(number));
     }
     return path;
+}
+void MainWindow::buildUi()
+{
+    // 旧界面先取下来，不立即删除；页面会把需要的控件 reparent 过去。
+    QWidget *oldCentral = takeCentralWidget();
+    auto *newCentral = new QWidget(this);
+    setCentralWidget(newCentral);
+
+    auto *root = new QVBoxLayout(newCentral);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+
+    m_titleBar = createTitleBar();
+    root->addWidget(m_titleBar);
+
+    m_pages = new QStackedWidget;
+    m_pages->setObjectName(QStringLiteral("pageStack"));
+    m_pages->addWidget(createBasicPage());
+    m_pages->addWidget(createAdvancedPage());
+    root->addWidget(m_pages, 1);
+
+    root->addWidget(createBottomBar());
+
+    connect(m_tabs, &QTabBar::currentChanged, this, [this](int index) {
+        if (m_pages && index >= 0 && index < m_pages->count())
+            m_pages->setCurrentIndex(index);
+    });
+    connect(ui->usingRegionCheckBox, &QCheckBox::toggled, this, &MainWindow::updateModeUi);
+
+    setModeButtonsEnabled(true);
+    updateModeUi();
+    updateOutputPathLabel();
+    setStateText(QStringLiteral("状态：待机"));
+    ui->statusbar->hide();
+
+    // 所有需要的控件都已经迁移到新页面；旧容器现在可以安全删除。
+    if (oldCentral)
+        oldCentral->deleteLater();
+
+    applyStyles();
+}
+
+WindowTitleBar *MainWindow::createTitleBar()
+{
+    auto *bar = new WindowTitleBar;
+    auto *layout = new QGridLayout(bar);
+    layout->setContentsMargins(18, 0, 18, 0);
+    layout->setHorizontalSpacing(12);
+    layout->setColumnStretch(0, 1);
+    layout->setColumnStretch(2, 1);
+
+    // 左侧：图标 + 应用名 + 版本徽标。
+    auto *brand = new QWidget;
+    auto *brandLayout = new QHBoxLayout(brand);
+    brandLayout->setContentsMargins(0, 0, 0, 0);
+    brandLayout->setSpacing(8);
+
+    auto *icon = new QLabel;
+    icon->setPixmap(makeAppIconPixmap(23));
+    icon->setFixedSize(23, 23);
+    brandLayout->addWidget(icon);
+
+    auto *name = new QLabel(QStringLiteral("ScreenRecorder"));
+    QFont nameFont = name->font();
+    nameFont.setWeight(QFont::DemiBold);
+    name->setFont(nameFont);
+    brandLayout->addWidget(name);
+
+    auto *version = new QLabel(QStringLiteral("V0.3"));
+    version->setObjectName(QStringLiteral("versionBadge"));
+    brandLayout->addWidget(version);
+
+    layout->addWidget(brand, 0, 0, Qt::AlignLeft | Qt::AlignVCenter);
+
+    // 中间：基本设置 / 高级设置。
+    m_tabs = new QTabBar;
+    m_tabs->addTab(QStringLiteral("基本设置"));
+    m_tabs->addTab(QStringLiteral("高级设置"));
+    m_tabs->setDrawBase(false);
+    m_tabs->setExpanding(false);
+    m_tabs->setUsesScrollButtons(false);
+    m_tabs->setFocusPolicy(Qt::NoFocus);
+    layout->addWidget(m_tabs, 0, 1, Qt::AlignCenter);
+
+    // 右侧：最小化 / 最大化 / 关闭。
+    auto *controls = new QWidget;
+    auto *controlsLayout = new QHBoxLayout(controls);
+    controlsLayout->setContentsMargins(0, 0, 0, 0);
+    controlsLayout->setSpacing(6);
+
+    auto addControl = [&](const QString &text, const QString &objectName) {
+        auto *button = new QToolButton;
+        button->setText(text);
+        button->setObjectName(objectName);
+        button->setFixedSize(30, 26);
+        button->setFocusPolicy(Qt::NoFocus);
+        controlsLayout->addWidget(button);
+        return button;
+    };
+
+    auto *minButton = addControl(QStringLiteral("—"), QStringLiteral("windowMinButton"));
+    auto *maxButton = addControl(QStringLiteral("▢"), QStringLiteral("windowMaxButton"));
+    auto *closeButton = addControl(QStringLiteral("✕"), QStringLiteral("windowCloseButton"));
+
+    connect(minButton, &QToolButton::clicked, this, &QWidget::showMinimized);
+    connect(maxButton, &QToolButton::clicked, this, [this] {
+        if (isMaximized())
+            showNormal();
+        else
+            showMaximized();
+    });
+    connect(closeButton, &QToolButton::clicked, this, [this] {
+        close();
+    });
+
+    layout->addWidget(controls, 0, 2, Qt::AlignRight | Qt::AlignVCenter);
+    return bar;
+}
+
+QWidget *MainWindow::createBasicPage()
+{
+    auto *page = new QWidget;
+    auto *pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(24, 24, 24, 24);
+    pageLayout->setSpacing(0);
+
+    auto *panel = new QFrame;
+    panel->setObjectName(QStringLiteral("settingsPanel"));
+    auto *panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(24, 8, 24, 8);
+    panelLayout->setSpacing(0);
+
+    // 录制范围：三选一；窗口按钮先禁用，等下一步接入捕获。
+    auto *rangeSection = new QWidget;
+    auto *rangeLayout = new QVBoxLayout(rangeSection);
+    rangeLayout->setContentsMargins(0, 16, 0, 16);
+    rangeLayout->setSpacing(0);
+    rangeLayout->addWidget(makeSectionTitle(QStringLiteral("录制范围")));
+    rangeLayout->addSpacing(8);
+
+    auto *segmented = new QWidget;
+    segmented->setObjectName(QStringLiteral("segmented"));
+    segmented->setAttribute(Qt::WA_StyledBackground, true);
+    auto *segmentedLayout = new QHBoxLayout(segmented);
+    segmentedLayout->setContentsMargins(3, 3, 3, 3);
+    segmentedLayout->setSpacing(3);
+
+    auto makeModeButton = [](const QString &text, const QString &objectName) {
+        auto *button = new QPushButton(text);
+        button->setObjectName(objectName);
+        button->setCheckable(true);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        button->setFixedHeight(34);
+        return button;
+    };
+
+    m_fullModeButton = makeModeButton(QStringLiteral("全屏"), QStringLiteral("fullModeButton"));
+    m_regionModeButton = makeModeButton(QStringLiteral("区域"), QStringLiteral("regionModeButton"));
+    m_windowModeButton = makeModeButton(QStringLiteral("窗口"), QStringLiteral("windowModeButton"));
+    m_windowModeButton->setEnabled(false);
+    m_windowModeButton->setToolTip(QStringLiteral("窗口录制将在下一步接入"));
+    m_fullModeButton->setChecked(true);
+
+    segmentedLayout->addWidget(m_fullModeButton);
+    segmentedLayout->addWidget(m_regionModeButton);
+    segmentedLayout->addWidget(m_windowModeButton);
+
+    auto *modeGroup = new QButtonGroup(this);
+    modeGroup->setExclusive(true);
+    modeGroup->addButton(m_fullModeButton);
+    modeGroup->addButton(m_regionModeButton);
+    modeGroup->addButton(m_windowModeButton);
+
+    connect(m_fullModeButton, &QPushButton::clicked, this, [this] {
+        ui->usingRegionCheckBox->setChecked(false);
+    });
+    connect(m_regionModeButton, &QPushButton::clicked, this, [this] {
+        ui->usingRegionCheckBox->setChecked(true);
+    });
+
+    rangeLayout->addWidget(segmented);
+
+    m_regionSelectionRow = new QWidget;
+    m_regionSelectionRow->setObjectName(QStringLiteral("selectionRow"));
+    m_regionSelectionRow->setAttribute(Qt::WA_StyledBackground, true);
+    m_regionSelectionRow->setFixedHeight(38);
+    auto *selectionLayout = new QHBoxLayout(m_regionSelectionRow);
+    selectionLayout->setContentsMargins(10, 0, 10, 0);
+    selectionLayout->setSpacing(8);
+
+    auto *selectionTitle = new QLabel(QStringLiteral("已选区域"));
+    selectionTitle->setObjectName(QStringLiteral("selectionLabel"));
+    m_regionChip = new QLabel(QStringLiteral("未选择"));
+    m_regionChip->setObjectName(QStringLiteral("selectionChip"));
+    m_regionMeta = new QLabel;
+    m_regionMeta->setObjectName(QStringLiteral("selectionMeta"));
+
+    selectionLayout->addWidget(selectionTitle);
+    selectionLayout->addWidget(m_regionChip);
+    selectionLayout->addWidget(m_regionMeta);
+    selectionLayout->addStretch();
+
+    ui->regionButton->setText(QStringLiteral("选择区域"));
+    selectionLayout->addWidget(ui->regionButton);
+
+    rangeLayout->addSpacing(8);
+    rangeLayout->addWidget(m_regionSelectionRow);
+    panelLayout->addWidget(rangeSection);
+    panelLayout->addWidget(makeDivider());
+
+    // 保存位置。
+    auto *saveSection = new QWidget;
+    auto *saveLayout = new QVBoxLayout(saveSection);
+    saveLayout->setContentsMargins(0, 16, 0, 16);
+    saveLayout->setSpacing(0);
+    saveLayout->addWidget(makeSectionTitle(QStringLiteral("保存位置")));
+    saveLayout->addSpacing(8);
+
+    auto *saveRow = new QWidget;
+    auto *saveRowLayout = new QHBoxLayout(saveRow);
+    saveRowLayout->setContentsMargins(0, 0, 0, 0);
+    saveRowLayout->setSpacing(9);
+
+    ui->outputDirectoryLabel->setObjectName(QStringLiteral("pathField"));
+    ui->outputDirectoryLabel->setWordWrap(false);
+    ui->outputDirectoryLabel->setMinimumHeight(34);
+    ui->outputDirectoryLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    ui->outputDirectoryLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    ui->chooseOutputDirectoryButton->setText(QStringLiteral("更改"));
+
+    saveRowLayout->addWidget(ui->outputDirectoryLabel, 1);
+    saveRowLayout->addWidget(ui->chooseOutputDirectoryButton);
+    saveLayout->addWidget(saveRow);
+    panelLayout->addWidget(saveSection);
+    panelLayout->addWidget(makeDivider());
+
+    // 音频。
+    auto *audioSection = new QWidget;
+    auto *audioLayout = new QVBoxLayout(audioSection);
+    audioLayout->setContentsMargins(0, 16, 0, 16);
+    audioLayout->setSpacing(0);
+    audioLayout->addWidget(makeSectionTitle(QStringLiteral("音频")));
+    audioLayout->addSpacing(8);
+
+    ui->microphoneCheckBox->setText(QStringLiteral("麦克风"));
+    ui->systemAudioCheckBox->setText(QStringLiteral("系统声音"));
+    ui->countdownCheckBox->setText(QStringLiteral("开始前倒计时"));
+
+    auto *microphoneRow = new QWidget;
+    auto *microphoneLayout = new QHBoxLayout(microphoneRow);
+    microphoneLayout->setContentsMargins(0, 0, 0, 0);
+    microphoneLayout->setSpacing(8);
+    microphoneLayout->addWidget(ui->microphoneCheckBox);
+    microphoneLayout->addStretch();
+    ui->microphoneComboBox->setMinimumWidth(220);
+    microphoneLayout->addWidget(ui->microphoneComboBox);
+    audioLayout->addWidget(microphoneRow);
+    audioLayout->addSpacing(8);
+
+    auto *systemAudioRow = new QWidget;
+    auto *systemAudioLayout = new QHBoxLayout(systemAudioRow);
+    systemAudioLayout->setContentsMargins(0, 0, 0, 0);
+    systemAudioLayout->addWidget(ui->systemAudioCheckBox);
+    systemAudioLayout->addStretch();
+    auto *systemAudioHint = new QLabel(QStringLiteral("WASAPI 回环"));
+    systemAudioHint->setObjectName(QStringLiteral("mutedLabel"));
+    systemAudioLayout->addWidget(systemAudioHint);
+    audioLayout->addWidget(systemAudioRow);
+    panelLayout->addWidget(audioSection);
+    panelLayout->addWidget(makeDivider());
+
+    // 倒计时。
+    auto *countdownSection = new QWidget;
+    auto *countdownLayout = new QVBoxLayout(countdownSection);
+    countdownLayout->setContentsMargins(0, 16, 0, 16);
+    countdownLayout->setSpacing(0);
+    countdownLayout->addWidget(makeSectionTitle(QStringLiteral("倒计时")));
+    countdownLayout->addSpacing(8);
+
+    auto *countdownRow = new QWidget;
+    auto *countdownRowLayout = new QHBoxLayout(countdownRow);
+    countdownRowLayout->setContentsMargins(0, 0, 0, 0);
+    countdownRowLayout->addWidget(ui->countdownCheckBox);
+    countdownRowLayout->addStretch();
+    ui->countdownSecondsComboBox->setFixedWidth(104);
+    countdownRowLayout->addWidget(ui->countdownSecondsComboBox);
+    countdownLayout->addWidget(countdownRow);
+    panelLayout->addWidget(countdownSection);
+
+    pageLayout->addWidget(panel);
+    pageLayout->addStretch(1);
+
+    // 隐藏的状态承载控件仍用于 full/region 判断和 QSettings。
+    ui->usingRegionCheckBox->setParent(page);
+    ui->usingRegionCheckBox->hide();
+    return page;
+}
+
+QWidget *MainWindow::createAdvancedPage()
+{
+    auto *page = new QWidget;
+    auto *pageLayout = new QVBoxLayout(page);
+    pageLayout->setContentsMargins(24, 24, 24, 24);
+    pageLayout->setSpacing(0);
+
+    auto *panel = new QFrame;
+    panel->setObjectName(QStringLiteral("settingsPanel"));
+    auto *panelLayout = new QVBoxLayout(panel);
+    panelLayout->setContentsMargins(24, 8, 24, 8);
+    panelLayout->setSpacing(0);
+
+    auto *videoSection = new QWidget;
+    auto *videoLayout = new QVBoxLayout(videoSection);
+    videoLayout->setContentsMargins(0, 16, 0, 16);
+    videoLayout->setSpacing(0);
+    videoLayout->addWidget(makeSectionTitle(QStringLiteral("视频参数")));
+    videoLayout->addSpacing(8);
+
+    auto addSettingRow = [&](const QString &text, QWidget *control) {
+        auto *row = new QWidget;
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        rowLayout->setSpacing(12);
+        auto *label = new QLabel(text);
+        label->setObjectName(QStringLiteral("rowLabel"));
+        rowLayout->addWidget(label);
+        rowLayout->addStretch();
+        control->setMinimumWidth(220);
+        rowLayout->addWidget(control);
+        videoLayout->addWidget(row);
+        videoLayout->addSpacing(8);
+    };
+
+    addSettingRow(QStringLiteral("帧率"), ui->frameRateComboBox);
+    addSettingRow(QStringLiteral("编码器"), ui->encoderComboBox);
+    addSettingRow(QStringLiteral("画质"), ui->qualityComboBox);
+    panelLayout->addWidget(videoSection);
+    panelLayout->addWidget(makeDivider());
+
+    auto *outputSection = new QWidget;
+    auto *outputLayout = new QVBoxLayout(outputSection);
+    outputLayout->setContentsMargins(0, 16, 0, 16);
+    outputLayout->setSpacing(0);
+    outputLayout->addWidget(makeSectionTitle(QStringLiteral("输出")));
+    outputLayout->addSpacing(8);
+
+    auto *checkRow = new QWidget;
+    auto *checkRowLayout = new QHBoxLayout(checkRow);
+    checkRowLayout->setContentsMargins(0, 0, 0, 0);
+    auto *checkLabel = new QLabel(QStringLiteral("停止后校验"));
+    checkLabel->setObjectName(QStringLiteral("rowLabel"));
+    auto *checkPill = new QLabel(QStringLiteral("已开启"));
+    checkPill->setObjectName(QStringLiteral("enabledPill"));
+    checkRowLayout->addWidget(checkLabel);
+    checkRowLayout->addStretch();
+    checkRowLayout->addWidget(checkPill);
+    outputLayout->addWidget(checkRow);
+    outputLayout->addSpacing(8);
+
+    auto *nameRow = new QWidget;
+    auto *nameRowLayout = new QHBoxLayout(nameRow);
+    nameRowLayout->setContentsMargins(0, 0, 0, 0);
+    auto *nameLabel = new QLabel(QStringLiteral("文件命名"));
+    nameLabel->setObjectName(QStringLiteral("rowLabel"));
+    auto *nameValue = new QLabel(QStringLiteral("capture-时间戳.mp4"));
+    nameValue->setObjectName(QStringLiteral("mutedLabel"));
+    nameRowLayout->addWidget(nameLabel);
+    nameRowLayout->addStretch();
+    nameRowLayout->addWidget(nameValue);
+    outputLayout->addWidget(nameRow);
+    panelLayout->addWidget(outputSection);
+
+    auto *note = new QLabel(QStringLiteral(
+        "固定参数：yuv420p · AAC · MP4 · ultrafast；窗口模式会在编码前裁到偶数尺寸。"));
+    note->setObjectName(QStringLiteral("noteLabel"));
+    note->setWordWrap(true);
+    panelLayout->addWidget(note);
+    panelLayout->addSpacing(4);
+
+    pageLayout->addWidget(panel);
+    pageLayout->addStretch(1);
+    return page;
+}
+
+QWidget *MainWindow::createBottomBar()
+{
+    auto *bar = new QFrame;
+    bar->setObjectName(QStringLiteral("bottomBar"));
+    bar->setFixedHeight(64);
+    auto *layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(24, 0, 24, 0);
+    layout->setSpacing(8);
+
+    auto *statusText = new QWidget;
+    auto *statusLayout = new QVBoxLayout(statusText);
+    statusLayout->setContentsMargins(0, 0, 0, 0);
+    statusLayout->setSpacing(2);
+
+    auto *stateRow = new QWidget;
+    auto *stateRowLayout = new QHBoxLayout(stateRow);
+    stateRowLayout->setContentsMargins(0, 0, 0, 0);
+    stateRowLayout->setSpacing(9);
+
+    auto *statusDot = new QLabel;
+    statusDot->setObjectName(QStringLiteral("statusDot"));
+    statusDot->setAttribute(Qt::WA_StyledBackground, true);
+    statusDot->setFixedSize(8, 8);
+    stateRowLayout->addWidget(statusDot);
+
+    ui->statusLabel->setObjectName(QStringLiteral("statusLabel"));
+    stateRowLayout->addWidget(ui->statusLabel);
+    stateRowLayout->addStretch();
+    statusLayout->addWidget(stateRow);
+
+    m_messageLabel = new QLabel;
+    m_messageLabel->setObjectName(QStringLiteral("statusMessage"));
+    m_messageLabel->setMinimumWidth(0);
+    m_messageLabel->setContentsMargins(17, 0, 0, 0);
+    m_messageLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    statusLayout->addWidget(m_messageLabel);
+    layout->addWidget(statusText, 1);
+
+    ui->cancelCountdownButton->setText(QStringLiteral("取消倒计时"));
+    ui->cancelCountdownButton->setVisible(false);
+    ui->startButton->setText(QStringLiteral("开始录制"));
+    ui->stopButton->setText(QStringLiteral("停止录制"));
+
+    layout->addWidget(ui->cancelCountdownButton);
+    layout->addWidget(ui->startButton);
+    layout->addWidget(ui->stopButton);
+
+    auto *grip = new WindowResizeGrip(bar);
+    grip->setFixedSize(16, 16);
+    layout->addWidget(grip);
+    return bar;
+}
+
+void MainWindow::applyStyles()
+{
+    setStyleSheet(QStringLiteral(
+        "QMainWindow { background: #FFFFFF; }"
+        "QFrame#windowTitleBar { background: #FFFFFF; border-bottom: 1px solid #E4E8EF; }"
+        "QLabel#versionBadge { color: #1F2937; background: #FFFFFF;"
+        " border: 1px solid #D8DEE8; border-radius: 4px;"
+        " padding: 3px 6px; font-size: 9px; font-weight: bold; }"
+        "QTabBar::tab { background: transparent; color: #6B7280; padding: 8px 17px;"
+        " border: none; border-bottom: 2px solid transparent; font-weight: 600; }"
+        "QTabBar::tab:selected { color: #2F6FED; border-bottom: 2px solid #2F6FED; }"
+        "QToolButton#windowMinButton, QToolButton#windowMaxButton, QToolButton#windowCloseButton {"
+        " border: none; background: transparent; color: #98A1AE; font-size: 12px; }"
+        "QToolButton#windowMinButton:hover, QToolButton#windowMaxButton:hover {"
+        " background: #F1F3F7; border-radius: 4px; }"
+        "QToolButton#windowCloseButton:hover { background: #FDE8E8; color: #E5484D; border-radius: 4px; }"
+        "QStackedWidget#pageStack { background: #F7F8FA; }"
+        "QFrame#settingsPanel { background: #FFFFFF; border: 1px solid #E4E8EF; border-radius: 12px; }"
+        "QLabel#sectionTitle { color: #6B7280; font-size: 11px; font-weight: bold; }"
+        "QFrame#divider { background: #EEF1F5; border: none; }"
+        "QWidget#segmented { background: #F1F3F7; border: 1px solid #E4E8EF; border-radius: 9px; }"
+        "QPushButton#fullModeButton, QPushButton#regionModeButton, QPushButton#windowModeButton {"
+        " border: 1px solid transparent; background: transparent; color: #6B7280;"
+        " border-radius: 6px; font-weight: 600; }"
+        "QPushButton#fullModeButton:checked, QPushButton#regionModeButton:checked,"
+        " QPushButton#windowModeButton:checked {"
+        " background: #FFFFFF; color: #2F6FED; border: 1px solid #C5D7FB; }"
+        "QPushButton#regionButton { border: none; background: transparent; color: #2F6FED;"
+        " font-weight: 600; padding: 4px 2px; }"
+        "QWidget#selectionRow { background: #F7F8FA; border: 1px solid #E4E8EF; border-radius: 8px; }"
+        "QLabel#selectionLabel { font-size: 11px; color: #6B7280; }"
+        "QLabel#selectionChip { font-size: 11px; font-weight: bold; color: #2F6FED;"
+        " background: #EEF4FF; border: 1px solid #C5D7FB; border-radius: 5px; padding: 2px 7px; }"
+        "QLabel#selectionMeta { font-size: 10px; color: #98A1AE; }"
+        "QLabel#pathField { background: #F7F8FA; border: 1px solid #D8DEE8;"
+        " border-radius: 7px; padding: 0 10px; color: #1F2937; }"
+        "QComboBox { background: #F7F8FA; border: 1px solid #D8DEE8; border-radius: 7px;"
+        " padding: 0 9px; min-height: 34px; color: #1F2937; }"
+        "QComboBox::drop-down { border: none; width: 24px; }"
+        "QCheckBox { color: #1F2937; font-size: 12px; spacing: 8px; }"
+        "QLabel#mutedLabel, QLabel#noteLabel { color: #98A1AE; font-size: 10px; }"
+        "QLabel#rowLabel { color: #1F2937; font-size: 12px; }"
+        "QLabel#enabledPill { color: #1F9D63; background: #EAF8F0; border-radius: 999px;"
+        " padding: 3px 8px; font-size: 10px; font-weight: bold; }"
+        "QFrame#bottomBar { background: #FFFFFF; border-top: 1px solid #E4E8EF; }"
+        "QLabel#statusDot { background: #1F9D63; border-radius: 4px; }"
+        "QLabel#statusLabel { color: #1F2937; font-size: 12px; font-weight: bold; }"
+        "QLabel#statusMessage { color: #6B7280; font-size: 10px; }"
+        "QPushButton#startButton { background: #2F6FED; color: #FFFFFF; border: none;"
+        " border-radius: 7px; padding: 0 17px; min-height: 34px; font-weight: 600; }"
+        "QPushButton#startButton:hover { background: #245FD4; }"
+        "QPushButton#startButton:disabled { background: #B8CFFB; color: #FFFFFF; }"
+        "QPushButton#stopButton { background: #FFFFFF; color: #E5484D; border: 1px solid #EFC0C2;"
+        " border-radius: 7px; padding: 0 14px; min-height: 34px; font-weight: 600; }"
+        "QPushButton#stopButton:disabled { color: #D8A7A9; border-color: #F0D6D7; }"
+        "QPushButton#cancelCountdownButton { background: #F7F8FA; color: #6B7280;"
+        " border: 1px solid #E4E8EF; border-radius: 7px; padding: 0 12px; min-height: 34px; }"
+        "QPushButton#chooseOutputDirectoryButton { background: #FFFFFF; color: #1F2937;"
+        " border: 1px solid #D8DEE8; border-radius: 7px; padding: 0 14px; min-height: 34px;"
+        " font-weight: 600; }"
+        "QPushButton[disabled] { color: #A0A7B4; }"
+    ));
+}
+
+void MainWindow::setStateText(const QString &text)
+{
+    QString value = text;
+    if (value.startsWith(QStringLiteral("状态：")))
+        value.remove(0, 3);
+    ui->statusLabel->setText(value);
+}
+
+void MainWindow::showStatusMessage(const QString &message, int timeout)
+{
+    if (m_messageLabel) {
+        m_messageLabel->setText(message);
+        m_messageLabel->setToolTip(message);
+    }
+    // 旧状态栏保持兼容；界面已经隐藏它。
+    ui->statusbar->showMessage(message, timeout);
+}
+
+void MainWindow::clearStatusMessage()
+{
+    if (m_messageLabel) {
+        m_messageLabel->clear();
+        m_messageLabel->setToolTip({});
+    }
+    ui->statusbar->clearMessage();
+}
+
+void MainWindow::setModeButtonsEnabled(bool enabled)
+{
+    ui->usingRegionCheckBox->setEnabled(enabled);
+    if (m_fullModeButton)
+        m_fullModeButton->setEnabled(enabled);
+    if (m_regionModeButton)
+        m_regionModeButton->setEnabled(enabled);
+    if (m_windowModeButton)
+        m_windowModeButton->setEnabled(false);
+}
+
+void MainWindow::updateModeUi()
+{
+    const bool region = ui->usingRegionCheckBox->isChecked();
+    if (m_fullModeButton)
+        m_fullModeButton->setChecked(!region);
+    if (m_regionModeButton)
+        m_regionModeButton->setChecked(region);
+    if (m_windowModeButton)
+        m_windowModeButton->setChecked(false);
+    if (m_regionSelectionRow)
+        m_regionSelectionRow->setVisible(region);
+}
+
+void MainWindow::updateOutputPathLabel()
+{
+    const QString path = m_outputDirectory.isEmpty()
+        ? QStringLiteral("未设置")
+        : QDir::toNativeSeparators(m_outputDirectory);
+    if (ui->outputDirectoryLabel) {
+        ui->outputDirectoryLabel->setText(path);
+        ui->outputDirectoryLabel->setToolTip(path);
+    }
+    if (m_messageLabel)
+        m_messageLabel->setText(QStringLiteral("保存到 %1").arg(path));
 }

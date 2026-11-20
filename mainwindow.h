@@ -14,6 +14,12 @@ class MainWindow;
 }
 QT_END_NAMESPACE
 
+class WindowTitleBar;
+class QLabel;
+class QPushButton;
+class QStackedWidget;
+class QTabBar;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -26,6 +32,30 @@ protected:
     void closeEvent(QCloseEvent*event) override;
 
 private:
+    void buildUi();
+    WindowTitleBar *createTitleBar();
+    QWidget *createBasicPage();
+    QWidget *createAdvancedPage();
+    QWidget *createBottomBar();
+    void applyStyles();
+    void setStateText(const QString &text);
+    void showStatusMessage(const QString &message, int timeout = 0);
+    void clearStatusMessage();
+    void setModeButtonsEnabled(bool enabled);
+    void updateModeUi();
+    void updateOutputPathLabel();
+
+    WindowTitleBar *m_titleBar = nullptr;
+    QTabBar *m_tabs = nullptr;
+    QStackedWidget *m_pages = nullptr;
+    QLabel *m_messageLabel = nullptr;
+    QPushButton *m_fullModeButton = nullptr;
+    QPushButton *m_regionModeButton = nullptr;
+    QPushButton *m_windowModeButton = nullptr;
+    QWidget *m_regionSelectionRow = nullptr;
+    QLabel *m_regionChip = nullptr;
+    QLabel *m_regionMeta = nullptr;
+
     Ui::MainWindow *ui;
     QProcess m_ffmpeg;
     QString m_outputFile;

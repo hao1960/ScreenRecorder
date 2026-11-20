@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ScreenRecorder UI Mockup v2</title>
+<style>
+  :root {
+    --bg: #e9edf3;
+    --window: #ffffff;
+    --panel: #ffffff;
+    --panel-soft: #f7f8fa;
+    --border: #e4e8ef;
+    --border-strong: #d8dee8;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --muted-2: #98a1ae;
+    --accent: #2f6fed;
+    --accent-soft: #eef4ff;
+    --accent-border: #c5d7fb;
+    --danger: #e5484d;
+    --success: #1f9d63;
+    --shadow: 0 22px 55px rgba(22, 34, 58, .18);
+    --shadow-soft: 0 1px 2px rgba(22, 34, 58, .05);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    width: 1000px;
+    height: 680px;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .canvas {
+    width: 1000px;
+    height: 680px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(circle at 18% 0%, rgba(47, 111, 237, .09), transparent 38%),
+      radial-gradient(circle at 92% 100%, rgba(31, 157, 99, .07), transparent 42%),
+      var(--bg);
+  }
+  .window {
+    width: 900px;
+    height: 620px;
+    display: flex;
+    flex-direction: column;
+    background: var(--window);
+    border: 1px solid rgba(0, 0, 0, .08);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .titlebar {
+    height: 34px;
+    flex: 0 0 34px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    background: #f4f6f9;
+    border-bottom: 1px solid var(--border);
+  }
+  .win-title {
+    flex: 1;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: .2px;
+  }
+  .win-controls { display: flex; gap: 16px; color: var(--muted-2); font-size: 11px; }
+
+  .tabsbar {
+    height: 54px;
+    flex: 0 0 54px;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    gap: 6px;
+    border-bottom: 1px solid var(--border);
+    background: var(--window);
+  }
+  .tab {
+    appearance: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 18px;
+    cursor: default;
+  }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .content {
+    flex: 1;
+    min-height: 0;
+    padding: 18px 24px;
+    background: #f7f8fa;
+    overflow: hidden;
+  }
+  .page { height: 100%; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-soft);
+    padding: 4px 24px;
+  }
+  .section { padding: 12px 0; }
+  .divider { height: 1px; background: #eef1f5; }
+  .section-title {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: .4px;
+    margin-bottom: 8px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 34px;
+  }
+  .row + .row { margin-top: 8px; }
+  .row-label { font-size: 12.5px; color: var(--text); min-width: 64px; }
+  .muted { font-size: 11px; color: var(--muted); }
+
+  .segmented {
+    display: flex;
+    gap: 3px;
+    padding: 3px;
+    background: #f1f3f7;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+  }
+  .segmented button {
+    flex: 1;
+    height: 32px;
+    appearance: none;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: default;
+  }
+  .segmented button.active {
+    background: var(--panel);
+    color: var(--accent);
+    box-shadow: var(--shadow-soft), inset 0 0 0 1px var(--accent-border);
+  }
+  .selection-row {
+    margin-top: 8px;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 10px;
+    background: var(--panel-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .selection-left { display: flex; align-items: center; gap: 8px; }
+  .selection-label { font-size: 11px; color: var(--muted); }
+  .chip {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-border);
+    border-radius: 5px;
+    padding: 2px 7px;
+  }
+  .selection-meta { font-size: 10.5px; color: var(--muted-2); }
+  .link-btn {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 4px 2px;
+    cursor: default;
+  }
+
+  .path-row { display: flex; align-items: center; gap: 9px; }
+  .path {
+    flex: 1;
+    min-width: 0;
+    height: 34px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    background: var(--panel-soft);
+    font-size: 11.5px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .btn {
+    appearance: none;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    height: 34px;
+    padding: 0 14px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    white-space: nowrap;
+    cursor: default;
+  }
+  .btn.secondary {
+    background: var(--panel);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+  .btn.primary {
+    background: var(--accent);
+    color: #fff;
+    padding: 0 17px;
+    box-shadow: 0 4px 10px rgba(47, 111, 237, .24);
+  }
+  .btn.stop {
+    background: var(--panel);
+    border-color: #efc0c2;
+    color: var(--danger);
+  }
+  .btn[disabled] { opacity: .42; box-shadow: none; }
+
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text);
+    user-select: none;
+  }
+  .check input { position: absolute; opacity: 0; pointer-events: none; }
+  .check .box {
+    width: 16px; height: 16px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    background: var(--panel);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 16px;
+  }
+  .check input:checked + .box {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .check input:checked + .box::after {
+    content: "";
+    width: 7px; height: 4px;
+    border-left: 2px solid #fff;
+    border-bottom: 2px solid #fff;
+    transform: rotate(-45deg) translateY(-1px);
+  }
+  .combo {
+    height: 34px;
+    min-width: 170px;
+    max-width: 225px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 9px;
+    background: var(--panel-soft);
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .combo span { overflow: hidden; text-overflow: ellipsis; }
+  .combo.compact { min-width: 104px; max-width: 104px; }
+  .combo .chev { color: var(--muted-2); flex: 0 0 auto; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    background: #eaf8f0;
+    color: var(--success);
+  }
+  .note {
+    margin: 2px 0 12px;
+    font-size: 10.5px;
+    color: var(--muted-2);
+    line-height: 1.5;
+  }
+
+  .actionbar {
+    height: 64px;
+    flex: 0 0 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 0 24px;
+    background: var(--window);
+    border-top: 1px solid var(--border);
+  }
+  .status { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .status .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(31, 157, 99, .12);
+    flex: 0 0 8px;
+  }
+  .status .label { font-size: 12.5px; font-weight: 700; line-height: 1.2; }
+  .status .sub {
+    margin-top: 3px;
+    font-size: 10px;
+    color: var(--muted);
+    max-width: 430px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .actions { display: flex; align-items: center; gap: 8px; }
+
+  .icon { width: 14px; height: 14px; display: inline-block; vertical-align: middle; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <div class="window">
+    <div class="titlebar">
+      <div class="win-title">ScreenRecorder</div>
+      <div class="win-controls"><span>—</span><span>▢</span><span>✕</span></div>
+    </div>
+
+    <header class="tabsbar">
+      <button class="tab active" data-page="basic">基本设置</button>
+      <button class="tab" data-page="advanced">高级设置</button>
+    </header>
+
+    <main class="content">
+      <section class="page" id="page-basic">
+        <div class="panel">
+          <div class="section">
+            <div class="section-title">录制范围</div>
+            <div class="segmented">
+              <button data-mode="full">全屏</button>
+              <button data-mode="region" class="active">区域</button>
+              <button data-mode="window">窗口</button>
+            </div>
+            <div class="selection-row" id="selection-row">
+              <div class="selection-left">
+                <span class="selection-label" id="selection-label">已选区域</span>
+                <span class="chip" id="selection-chip">1402 × 796</span>
+                <span class="selection-meta" id="selection-meta">x=100, y=120</span>
+              </div>
+              <button class="link-btn">重新选择</button>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="section">
+            <div class="section-title">保存位置</div>
+            <div class="path-row">
+              <div class="path">E:\QT_app\sr_test</div>
+              <button class="btn secondary">更改</button>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="section">
+            <div class="section-title">音频</div>
+            <div class="row">
+              <label class="check"><input type="checkbox" checked><span class="box"></span>麦克风</label>
+              <div class="combo"><span>麦克风阵列 (Realtek® Audio)</span>
+                <svg class="icon chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+            <div class="row">
+              <label class="check"><input type="checkbox" checked><span class="box"></span>系统声音</label>
+              <span class="muted">WASAPI 回环</span>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="section">
+            <div class="section-title">倒计时</div>
+            <div class="row">
+              <label class="check"><input type="checkbox" checked><span class="box"></span>开始前倒计时</label>
+              <div class="combo compact"><span>3 秒</span>
+                <svg class="icon chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-advanced">
+        <div class="panel">
+          <div class="section">
+            <div class="section-title">视频参数</div>
+            <div class="row">
+              <span class="row-label">帧率</span>
+              <div class="combo"><span>30 fps</span>
+                <svg class="icon chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+            <div class="row">
+              <span class="row-label">编码器</span>
+              <div class="combo"><span>H.264（libx264）</span>
+                <svg class="icon chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+            <div class="row">
+              <span class="row-label">画质</span>
+              <div class="combo"><span>均衡（CRF 23）</span>
+                <svg class="icon chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+              </div>
+            </div>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="section">
+            <div class="section-title">输出</div>
+            <div class="row">
+              <span class="row-label">停止后校验</span>
+              <span class="pill">已开启</span>
+            </div>
+            <div class="row">
+              <span class="row-label">文件命名</span>
+              <span class="muted">capture-时间戳.mp4</span>
+            </div>
+          </div>
+
+          <div class="note">固定参数：yuv420p · AAC · MP4 · ultrafast；窗口模式会在编码前裁到偶数尺寸。</div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="actionbar">
+      <div class="status">
+        <span class="dot"></span>
+        <div>
+          <div class="label">待机</div>
+          <div class="sub">保存到 E:\QT_app\sr_test</div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn primary">
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="5"/></svg>
+          开始录制
+        </button>
+        <button class="btn stop" disabled>
+          <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+          停止录制
+        </button>
+      </div>
+    </footer>
+  </div>
+</div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const page = params.get('page') === 'advanced' ? 'advanced' : 'basic';
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.classList.toggle('active', tab.dataset.page === page);
+  });
+  document.getElementById('page-basic').classList.toggle('hidden', page !== 'basic');
+  document.getElementById('page-advanced').classList.toggle('hidden', page !== 'advanced');
+
+  const mode = params.get('mode') || 'region';
+  document.querySelectorAll('.segmented button').forEach(button => {
+    button.classList.toggle('active', button.dataset.mode === mode);
+  });
+  const selectionRow = document.getElementById('selection-row');
+  if (mode === 'full') {
+    selectionRow.classList.add('hidden');
+  } else {
+    selectionRow.classList.remove('hidden');
+    if (mode === 'window') {
+      document.getElementById('selection-label').textContent = '已选窗口';
+      document.getElementById('selection-chip').textContent = '676 × 485';
+      document.getElementById('selection-meta').textContent = 'Notepad · cg.txt';
+    } else {
+      document.getElementById('selection-label').textContent = '已选区域';
+      document.getElementById('selection-chip').textContent = '1402 × 796';
+      document.getElementById('selection-meta').textContent = 'x=100, y=120';
+    }
+  }
+</script>
+</body>
+</html>
